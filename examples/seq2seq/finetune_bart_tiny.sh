@@ -1,3 +1,4 @@
+#!/bin/bash
 # Script for verifying that run_bart_sum can be invoked from its directory
 
 # Get tiny dataset with cnn_dm format (4 examples for train, val, test)
