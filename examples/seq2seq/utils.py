@@ -16,11 +16,12 @@ from sacrebleu import corpus_bleu
 from torch import nn
 from torch.utils.data import Dataset, Sampler
 
-from transformers import BartTokenizer
+from transformers import BartTokenizer, T5Tokenizer
 
 
 def encode_line(tokenizer, line, max_length, pad_to_max_length=True, return_tensors="pt"):
     extra_kw = {"add_prefix_space": True} if isinstance(tokenizer, BartTokenizer) else {}
+    line = f"{line} {tokenizer.eos_token}" if isinstance(tokenizer, T5Tokenizer) else line
     return tokenizer(
         [line],
         max_length=max_length,
@@ -38,7 +39,9 @@ def lmap(f: Callable, x: Iterable) -> List:
 
 def calculate_bleu_score(output_lns, refs_lns, **kwargs) -> dict:
     """Uses sacrebleu's corpus_bleu implementation."""
-    return {"bleu": corpus_bleu(output_lns, [refs_lns], **kwargs).score}
+    if not isinstance(refs_lns[0], list):
+        refs_lns = [refs_lns]
+    return {"bleu": corpus_bleu(output_lns, refs_lns, **kwargs).score}
 
 
 def trim_batch(
