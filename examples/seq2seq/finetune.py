@@ -26,6 +26,7 @@ try:
         pickle_save,
         save_git_info,
         save_json,
+        load_json,
         freeze_params,
         calculate_rouge,
         get_git_info,
@@ -47,6 +48,7 @@ except ImportError:
         pickle_save,
         save_git_info,
         save_json,
+        load_json,
         freeze_params,
         calculate_rouge,
         get_git_info,
@@ -66,7 +68,8 @@ class SummarizationModule(BaseTransformer):
 
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
-        use_task_specific_params(self.model, "summarization")
+
+        use_task_specific_params(self.model, self.mode)
         save_git_info(self.hparams.output_dir)
         self.metrics_save_path = Path(self.output_dir) / "metrics.json"
         self.hparams_save_path = Path(self.output_dir) / "hparams.pkl"
@@ -275,11 +278,18 @@ class SummarizationModule(BaseTransformer):
             "than this will be truncated, sequences shorter will be padded.",
         )
         parser.add_argument(
+            "--num_beams",
+            default=3,
+            type=int,
+            help="Beam size during generation.",
+        )
+        parser.add_argument(
             "--data_dir",
             type=str,
             required=True,
             help="The input data dir. Should contain train.source, train.target, val.source, val.target, test.source, test.target",
         )
+        parser.add_argument("--new_tokens_fpath", help="Path to json of additional tokens")
         parser.add_argument("--freeze_encoder", action="store_true")
         parser.add_argument("--freeze_embeds", action="store_true")
         parser.add_argument("--sortish_sampler", action="store_true", default=False)
@@ -314,6 +324,28 @@ class TranslationModule(SummarizationModule):
         return calculate_bleu_score(preds, target)
 
 
+class DataToTextModule(SummarizationModule):
+    mode = "data-to-text"
+    loss_names = ["loss"]
+    metric_names = ["bleu"]
+    val_metric = "bleu"
+
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        additional_tokens = load_json(hparams.new_tokens_fpath)
+        self.tokenizer.add_tokens(additional_tokens)
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        self.model.config.update({
+            'num_beams': hparams.num_beams,
+            'max_length': 150,
+            'prefix': '', #'translate Graph to Text: '
+        })
+        self.dataset_kwargs['prefix'] = self.model.config.prefix
+
+    def calc_generative_metrics(self, preds, target) -> dict:
+        return calculate_bleu_score(preds, target)
+
+
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     if len(os.listdir(args.output_dir)) > 3 and args.do_train:
@@ -321,8 +353,10 @@ def main(args, model=None) -> SummarizationModule:
     if model is None:
         if args.task == "summarization":
             model: SummarizationModule = SummarizationModule(args)
-        else:
+        elif args.task == "translation":
             model: SummarizationModule = TranslationModule(args)
+        elif args.task == "data-to-text":
+            model: SummarizationModule = DataToTextModule(args)
 
     dataset = Path(args.data_dir).name
     if (
@@ -341,6 +375,8 @@ def main(args, model=None) -> SummarizationModule:
         from pytorch_lightning.loggers import WandbLogger
 
         logger = WandbLogger(name=model.output_dir.name, project=f"hf_{dataset}")
+    if args.val_check_interval > 1:
+        args.val_check_interval = int(args.val_check_interval)
     trainer: pl.Trainer = generic_train(
         model,
         args,

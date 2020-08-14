@@ -36,6 +36,7 @@ MODEL_MODES = {
     "language-modeling": AutoModelWithLMHead,
     "summarization": AutoModelForSeq2SeqLM,
     "translation": AutoModelForSeq2SeqLM,
+    "data-to-text": AutoModelForSeq2SeqLM,
 }
 
 
