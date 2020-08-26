@@ -1,7 +1,9 @@
 import argparse
 import json
 import sys
+from unidecode import unidecode
 from pathlib import Path
+import re
 
 sys.path.append("..")
 
@@ -46,7 +48,7 @@ def generate_from_model(
 
 def val_tokenize(lines, tokenizer=None):
     """
-    To ensure consistency with other models, we want to tokenize/detokenize in the same
+    To ensure consistency with other models, we want to tokenize/normedenize in the same
     way across all models.
 
     TODO: Fix this across all modules, since it's messy
@@ -100,11 +102,13 @@ def run_generate():
             model: SummarizationModule = DataToTextModule(prev_args)
         else:
             model: SummarizationModule = ShuffledDataToTextModule(prev_args)
+    if args.type_path == 'test-unseen':
+        model.n_obs['test-unseen'] = model.n_obs['test']
+        model.target_lens['test-unseen'] = model.target_lens['test']
 
     data_loader = model.get_dataloader(
         type_path=args.type_path, batch_size=args.bs, shuffle=False
     )
-
     Path(args.output_dir).mkdir(exist_ok=True)
 
     # Make generations
@@ -148,7 +152,22 @@ def run_generate():
         lines = val_tokenize(lines, val_tokenizer)
         reference_lns.append(lines)
 
+    # main BLEU
     scores = score_fn(preds, reference_lns)
+    if args.tokenizer_path_or_name is None:
+        preds_normed = [
+            ' '.join(re.split('(\W)', unidecode(line.lower())))
+            for line in preds
+        ]
+        reference_lns_normed  = [
+            [
+                ' '.join(re.split('(\W)', unidecode(line.lower())))
+                for line in ref
+            ] for ref in reference_lns
+        ]
+        scores_normed = score_fn(preds_normed, reference_lns_normed)
+        scores['bleu_normed'] = scores_normed['bleu']
+
     save_json(scores, Path(args.output_dir, f"{args.type_path}-bleu.json"))
 
 
