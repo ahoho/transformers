@@ -33,6 +33,7 @@ try:
         ROUGE_KEYS,
         calculate_bleu_score,
         Seq2SeqDataset,
+        KGShuffleDataset,
         MBartDataset,
     )
 
@@ -40,6 +41,7 @@ try:
 except ImportError:
     from utils import (
         Seq2SeqDataset,
+        KGShuffleDataset,
         MBartDataset,
         assert_all_frozen,
         use_task_specific_params,
@@ -213,6 +215,8 @@ class SummarizationModule(BaseTransformer):
             assert self.hparams.gpus <= 1  # TODO: assert earlier
             sampler = dataset.make_sortish_sampler(batch_size)
             shuffle = False
+        #if type_path == "val": # TODO: make a param; long/harder sentences at bottom
+        #    sampler = dataset.end_of_data_sampler()
 
         dataloader = DataLoader(
             dataset,
@@ -302,6 +306,11 @@ class SummarizationModule(BaseTransformer):
         )
         parser.add_argument("--src_lang", type=str, default="", required=False)
         parser.add_argument("--tgt_lang", type=str, default="", required=False)
+
+        parser.add_argument("--shuffle_graph_components", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_subcomponents", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
+    
         return parser
 
 
@@ -346,6 +355,19 @@ class DataToTextModule(SummarizationModule):
         return calculate_bleu_score(preds, target)
 
 
+class ShuffledDataToTextModule(DataToTextModule):
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        self.dataset_class = KGShuffleDataset
+        self.dataset_kwargs.update({
+            "shuffle_eval": hparams.shuffle_graph_during_eval,
+            "shuffle_components": hparams.shuffle_graph_components,
+            "component_break": "<entity>",
+            "shuffle_spo": hparams.shuffle_graph_subcomponents,
+            "spo_regex": "<[SPO]>[^<]+", 
+        })
+
+
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     if len(os.listdir(args.output_dir)) > 3 and args.do_train:
@@ -356,7 +378,10 @@ def main(args, model=None) -> SummarizationModule:
         elif args.task == "translation":
             model: SummarizationModule = TranslationModule(args)
         elif args.task == "data-to-text":
-            model: SummarizationModule = DataToTextModule(args)
+            if not args.shuffle_graph_components:
+                model: SummarizationModule = DataToTextModule(args)
+            else:
+                model: SummarizationModule = ShuffledDataToTextModule(args)
 
     dataset = Path(args.data_dir).name
     if (

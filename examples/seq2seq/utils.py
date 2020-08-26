@@ -4,6 +4,8 @@ import linecache
 import os
 import pickle
 import warnings
+import random
+import re
 from logging import getLogger
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List
@@ -130,6 +132,102 @@ class Seq2SeqDataset(Dataset):
 
     def make_sortish_sampler(self, batch_size):
         return SortishSampler(self.src_lens, batch_size)
+
+
+class KGShuffleDataset(Seq2SeqDataset):
+    """
+    Shuffle linearized knowledge graphs (KG) by triple and, within each triple, by entity
+    """
+    def __init__(
+        self,
+        tokenizer,
+        data_dir,
+        max_source_length,
+        max_target_length,
+        type_path="train",
+        n_obs=None,
+        src_lang=None,
+        tgt_lang=None,
+        prefix="",
+        shuffle_components=True,
+        component_break="<entity>",
+        shuffle_spo=False,
+        spo_regex="<[SPO]>[^<]+",
+        shuffle_eval=False,
+        eval_seed=42,
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            data_dir=data_dir,
+            max_source_length=max_source_length,
+            max_target_length=max_target_length,
+            type_path=type_path,
+            n_obs=n_obs,
+            src_lang=src_lang,
+            tgt_lang=src_lang,
+            prefix=prefix,
+        )
+        self.type_path = type_path
+        self.eval_seed = eval_seed
+        if type_path == "train" or shuffle_eval:
+            self.shuffle_components = shuffle_components
+            self.shuffle_spo = shuffle_spo
+            self.component_break = component_break
+            self.spo_regex = spo_regex
+            self.shuffle_eval = shuffle_eval
+        else:
+            self.shuffle_components = False
+            self.shuffle_spo = False
+
+
+    def shuffle_graph_components_in_line(self, source_line):
+        """
+        Randomize the linearization of the graph
+        """
+        # TODO: this is pretty brittle, just change inputs to json or something
+        rng = None
+        if self.type_path in ["val", "test"]:
+            rng = self.eval_seed
+        random.seed(rng)
+        components = re.split(self.component_break, source_line)
+        components = [c for c in components if c]
+        random.shuffle(components)
+        if self.shuffle_spo:
+            components_with_shuffled_spo = []
+            for spo in components:
+                spo_split = re.findall(self.spo_regex, spo)
+                assert(len(spo_split) == 3)
+                random.seed(rng)
+                shuffled_spo = " ".join(random.sample(spo_split, 3))
+                components_with_shuffled_spo.append(shuffled_spo)
+            components = components_with_shuffled_spo
+
+        prefix = f"translate from graph to text: {self.component_break} "
+        source_line = prefix + self.component_break.join(components)
+        return source_line
+
+    def __getitem__(self, index) -> Dict[str, torch.Tensor]:
+        index = index + 1  # linecache starts at 1
+        source_line = linecache.getline(str(self.src_file), index).rstrip("\n")
+        tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+
+        if self.shuffle_components:
+            source_line = self.shuffle_graph_components_in_line(source_line)
+
+        assert source_line, f"empty source line for index {index}"
+        assert tgt_line, f"empty tgt line for index {index}"
+
+        source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
+        target_inputs = encode_line(self.tokenizer, tgt_line, self.max_target_length)
+
+        source_ids = source_inputs["input_ids"].squeeze()
+        target_ids = target_inputs["input_ids"].squeeze()
+        src_mask = source_inputs["attention_mask"].squeeze()
+        return {
+            "input_ids": source_ids,
+            "attention_mask": src_mask,
+            "decoder_input_ids": target_ids,
+        }
 
 
 class MBartDataset(Seq2SeqDataset):

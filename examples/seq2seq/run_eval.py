@@ -9,7 +9,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, BertTokenizer, T5Tokenizer
 
-from finetune import SummarizationModule, TranslationModule, TranslationModule
+from finetune import SummarizationModule, TranslationModule, DataToTextModule, ShuffledDataToTextModule
 
 try:
     from .utils import pickle_load, pickle_save, save_json, Seq2SeqDataset, calculate_bleu_score
@@ -73,6 +73,7 @@ def run_generate():
     parser.add_argument("--tokenizer_path_or_name", default=None, help="Use this to match tokenization between models")
     parser.add_argument("--device", type=str, required=False, default=DEFAULT_DEVICE, help="cuda, cuda:1, cpu etc.")
     parser.add_argument("--bs", type=int, default=8, required=False, help="batch size")
+    parser.add_argument("--shuffle_graph_components", default=False, required=False, action="store_true")
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
     )
@@ -81,7 +82,10 @@ def run_generate():
     
     # Reset previously used arguments as necessary
     prev_args = pickle_load(Path(args.model_dir, "hparams.pkl"))
-    prev_args.model_name_or_path = str(Path(prev_args.output_dir, "best_tfmr"))
+    prev_args.model_name_or_path = str(Path(args.model_dir, "best_tfmr"))
+    prev_args.output_dir = str(args.model_dir)
+    prev_args.shuffle_graph_components = args.shuffle_graph_components
+    prev_args.shuffle_graph_during_eval = args.shuffle_graph_components
     setattr(prev_args, f"n_{args.type_path}", args.n_obs)
 
     if args.data_dir is not None:
@@ -92,7 +96,10 @@ def run_generate():
     elif prev_args.task == "translation":
         model = TranslationModule(prev_args)
     elif prev_args.task == "data-to-text":
-        model = TranslationModule(prev_args)
+        if not prev_args.shuffle_graph_components:
+            model: SummarizationModule = DataToTextModule(prev_args)
+        else:
+            model: SummarizationModule = ShuffledDataToTextModule(prev_args)
 
     data_loader = model.get_dataloader(
         type_path=args.type_path, batch_size=args.bs, shuffle=False
@@ -109,15 +116,18 @@ def run_generate():
         device=args.device,
     )
 
+    # Append "shuffle" if shuffling
+    if args.shuffle_graph_components:
+        args.type_path = f"{args.type_path}-shuffled"
+
     pickle_save(args, Path(args.output_dir, f"{args.type_path}-hparams.pkl"))
 
     with open(Path(args.output_dir, f"{args.type_path}.pred"), "w") as outfile:
         for sent in preds:
             outfile.write(f"{sent}\n")
-    
     if not args.reference_paths:
         return
-    
+
     # Compute scores
     score_fn = calculate_bleu_score # TODO: support others
 
