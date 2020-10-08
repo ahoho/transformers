@@ -319,6 +319,8 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--resume_from_checkpont", type=str, default=None)
 
         parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
+        parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
+    
         return parser
 
 
@@ -386,6 +388,7 @@ class AMRToTextModule(DataToTextModule):
         self.dataset_kwargs.update({
             "shuffle_eval": hparams.shuffle_graph_during_eval,
             "graph_shuffling": hparams.amr_shuffling,
+            "append_second_graph": hparams.append_second_amr,
         })
 
 

@@ -84,6 +84,7 @@ def run_generate():
     parser.add_argument("--bs", type=int, default=8, required=False, help="batch size")
     parser.add_argument("--shuffle_graph_components", default=False, required=False, action="store_true")
     parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
+    parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
     )
@@ -94,12 +95,20 @@ def run_generate():
     prev_args = pickle_load(Path(args.model_dir, "hparams.pkl"))
     prev_args.model_name_or_path = str(Path(args.model_dir, "best_tfmr"))
     prev_args.output_dir = str(args.model_dir)
+
     prev_args.shuffle_graph_components = args.shuffle_graph_components
+    trained_with_second_amr = hasattr(prev_args, "append_second_amr")
+    prev_args.append_second_amr = args.append_second_amr
+    if trained_with_second_amr and args.append_second_amr is None:
+        print("Trained with a second AMR, but not set during evaluation")
+
     prev_args.amr_shuffling = args.amr_shuffling
     prev_args.shuffle_graph_during_eval = (
         args.shuffle_graph_components or 
         args.amr_shuffling is not None or
+        args.append_second_amr not in [None, "canonical"]
     )
+
     setattr(prev_args, f"n_{args.type_path}", args.n_obs)
 
     if args.data_dir is not None:
@@ -146,6 +155,10 @@ def run_generate():
         args.type_path = f"{args.type_path}-shuffled"
     if args.amr_shuffling:
         args.type_path = f"{args.type_path}-{args.amr_shuffling}" 
+    if args.append_second_amr:
+        args.type_path = f"{args.type_path}-second_{args.append_second_amr}"
+    if args.data_dir is not None: # implies a different evaluation dataset
+        args.type_path = f"{Path(args.data_dir).name}-{args.type_path}"
 
     pickle_save(args, Path(args.output_dir, f"{args.type_path}-hparams.pkl"))
 

@@ -174,6 +174,7 @@ class PenmanDataset(Seq2SeqDataset):
         prefix="",
         graph_shuffling=None,
         shuffle_eval=False,
+        append_second_graph=None,
         eval_seed=42,
     ):
         super().__init__(
@@ -191,11 +192,13 @@ class PenmanDataset(Seq2SeqDataset):
         self.eval_seed = eval_seed
         self.amr_codec = PENMANCodec()
         self.sense_pattern = re.compile('-[0-9][0-9]$')
+        self.append_second_graph = append_second_graph
 
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
         else:
             self.graph_shuffling = None
+            self.append_second_graph = "canonical" if self.append_second_graph is not None else None
 
     def randomize_graph(self, graph_repr, graph_shuffling):
         """
@@ -280,6 +283,12 @@ class PenmanDataset(Seq2SeqDataset):
 
         return ' '.join(new_tokens)
 
+    def simplify_graph_alt(self, graph_repr):
+        """
+        Alternative simplification that relies on penman library
+        """
+        # TODO
+        pass
 
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
@@ -294,6 +303,18 @@ class PenmanDataset(Seq2SeqDataset):
         if self.graph_shuffling is not None:
             graph_repr = self.randomize_graph(orig_graph_repr, self.graph_shuffling)
         
+        # append a second representation, if desired
+        if self.append_second_graph is not None:
+            graph_repr_added = orig_graph_repr
+            if self.append_second_graph != "canonical":
+                graph_repr_added = self.randomize_graph(
+                    orig_graph_repr, self.append_second_graph
+                )
+            graph_a, graph_b = graph_repr, graph_repr_added
+            if self.type_path == "train" and random.random() > 0.5:
+                graph_a, graph_b = graph_b, graph_a
+            graph_repr = f"{graph_a} <GRAPH> {graph_b}" # should be added to tokenizer
+
         graph_repr = self.simplify_graph(graph_repr)
 
         source_line = self.prefix + graph_repr
