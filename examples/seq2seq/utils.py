@@ -74,6 +74,7 @@ class Seq2SeqDataset(Dataset):
         self.src_file = Path(data_dir).joinpath(type_path + ".source")
         self.tgt_file = Path(data_dir).joinpath(type_path + ".target")
         self.src_lens = self.get_char_lens(self.src_file)
+        self.lines_in_src_file = len(self.src_lens)
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         assert min(self.src_lens) > 0, f"found empty line in {self.src_file}"
@@ -133,6 +134,8 @@ class Seq2SeqDataset(Dataset):
     def make_sortish_sampler(self, batch_size):
         return SortishSampler(self.src_lens, batch_size)
 
+    def end_of_data_sampler(self):
+        return EndSequentialSampler(len(self), end=self.lines_in_src_file)
 
 class KGShuffleDataset(Seq2SeqDataset):
     """
@@ -351,6 +354,23 @@ class SortishSampler(Sampler):
         sort_idx = np.concatenate(np.random.permutation(ck_idx[1:])) if len(ck_idx) > 1 else np.array([], dtype=np.int)
         sort_idx = np.concatenate((ck_idx[0], sort_idx))
         return iter(sort_idx)
+
+class EndSequentialSampler(Sampler):
+    r"""Samples elements sequentially, always in the same order.
+
+    Arguments:
+        data_source (Dataset): dataset to sample from
+    """
+
+    def __init__(self, size, end):
+        self.size = size
+        self.end = end
+
+    def __iter__(self):
+        return iter(range(self.end - self.size, self.end))
+
+    def __len__(self):
+        return self.size
 
 
 logger = getLogger(__name__)
