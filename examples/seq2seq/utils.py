@@ -16,8 +16,13 @@ from rouge_score import rouge_scorer, scoring
 from sacrebleu import corpus_bleu
 from unidecode import unidecode
 
+import torch
 from torch import nn
 from torch.utils.data import Dataset, Sampler
+
+from penman import layout, Graph
+from penman.model import Model
+from penman.codec import PENMANCodec
 
 from transformers import BartTokenizer, T5Tokenizer
 
@@ -150,6 +155,159 @@ class Seq2SeqDataset(Dataset):
 
     def end_of_data_sampler(self):
         return EndSequentialSampler(len(self), end=self.lines_in_src_file)
+
+
+class PenmanDataset(Seq2SeqDataset):
+    """
+    Handle AMR graphs in Penman, allowing for shuffling of representation
+    """
+    def __init__(
+        self,
+        tokenizer,
+        data_dir,
+        max_source_length,
+        max_target_length,
+        type_path="train",
+        n_obs=None,
+        src_lang=None,
+        tgt_lang=None,
+        prefix="",
+        graph_shuffling=None,
+        shuffle_eval=False,
+        eval_seed=42,
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            data_dir=data_dir,
+            max_source_length=max_source_length,
+            max_target_length=max_target_length,
+            type_path=type_path,
+            n_obs=n_obs,
+            src_lang=src_lang,
+            tgt_lang=src_lang,
+            prefix=prefix,
+        )
+        self.type_path = type_path
+        self.eval_seed = eval_seed
+        self.amr_codec = PENMANCodec()
+        self.sense_pattern = re.compile('-[0-9][0-9]$')
+
+        if type_path == "train" or shuffle_eval:
+            self.graph_shuffling = graph_shuffling
+        else:
+            self.graph_shuffling = None
+
+    def randomize_graph(self, graph_repr, graph_shuffling):
+        """
+        Randomize the graph while maintaining PENMAN notation
+        """
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+        
+        if graph_shuffling == "rearrange":
+            tree = self.amr_codec.parse(graph_repr)
+            layout.rearrange(tree, key=Model().random_order) # inplace operation
+            new_repr = self.amr_codec.format(tree)
+        if graph_shuffling == "reconfigure":
+            graph = self.amr_codec.decode(graph_repr)
+            tree = layout.reconfigure(graph, key=Model().random_order)
+            new_repr = self.amr_codec.format(tree)
+        if graph_shuffling == "randomize":
+            graph = self.amr_codec.decode(graph_repr)
+            graph_random = Graph(random.sample(graph.triples, k=len(graph.triples)))
+            new_repr = self.amr_codec.encode(graph_random)
+    
+        return new_repr
+
+    def simplify_graph(self, graph_repr):
+        """
+        Borrowed from dualgraph's preproc_amr.py, removes extraneous info from graph
+
+        github.com/UKPLab/emnlp2019-dualgraph
+        """
+        graph = self.amr_codec.decode(graph_repr)
+        instance_map = {
+            i.source: i.target for i in graph.instances() if i.target is not None
+        }
+        tokens = graph_repr.split()
+
+        new_tokens = []
+
+        for prev_tok, tok in zip([None] + tokens[:-1], tokens):
+            # ignore wiki
+            if prev_tok == ":wiki" or tok == ":wiki":
+                continue
+
+            # ignore instance-of
+            if tok.startswith('('):
+                new_tokens.append('(')
+                continue
+            elif tok == '/':
+                instance_declaration = True
+                continue
+            
+            # predicates, we remove any alignment information and parenthesis
+            elif tok.startswith(':'):
+
+                new_tok = tok.strip(')')
+                new_tokens.append(new_tok)
+
+                count_ = tok.count(')')
+                for _ in range(count_):
+                    new_tokens.append(')')
+
+            # concepts/reentrancies, treated similar as above
+            else:
+                new_tok = tok.strip(')')
+                new_tok = new_tok.split('~')[0]
+                # now we check if it is a concept or a variable (reentrancy)
+                # need to check for "instance-of" because of first person pronoun "I"
+                if new_tok in instance_map and not prev_tok == '/':
+                    # reentrancy: replace with concept
+                    new_tok = instance_map[new_tok]
+
+                # remove sense information
+                elif re.search(self.sense_pattern, new_tok):
+                    new_tok = new_tok[:-3]
+                # remove quotes
+                elif new_tok[0] == '"' and new_tok[-1] == '"':
+                    new_tok = new_tok[1:-1]
+                new_tokens.append(new_tok)
+
+                count_ = tok.count(')')
+                for _ in range(count_):
+                    new_tokens.append(')')
+
+        return ' '.join(new_tokens)
+
+
+    def __getitem__(self, index) -> Dict[str, torch.Tensor]:
+        index = index + 1  # linecache starts at 1
+        graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
+        orig_graph_repr = graph_repr
+
+        tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+        assert graph_repr, f"empty source line for index {index}"
+        assert tgt_line, f"empty tgt line for index {index}"
+
+        # randomize the graph
+        if self.graph_shuffling is not None:
+            graph_repr = self.randomize_graph(orig_graph_repr, self.graph_shuffling)
+        
+        graph_repr = self.simplify_graph(graph_repr)
+
+        source_line = self.prefix + graph_repr
+        source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
+        target_inputs = encode_line(self.tokenizer, tgt_line, self.max_target_length)
+
+        source_ids = source_inputs["input_ids"].squeeze()
+        target_ids = target_inputs["input_ids"].squeeze()
+        src_mask = source_inputs["attention_mask"].squeeze()
+        return {
+            "input_ids": source_ids,
+            "attention_mask": src_mask,
+            "decoder_input_ids": target_ids,
+        }
 
 
 class WebNLGShuffleDataset(Seq2SeqDataset):

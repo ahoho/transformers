@@ -34,6 +34,7 @@ try:
         calculate_bleu_score,
         Seq2SeqDataset,
         WebNLGShuffleDataset,
+        PenmanDataset,
         MBartDataset,
     )
 
@@ -42,6 +43,7 @@ except ImportError:
     from utils import (
         Seq2SeqDataset,
         WebNLGShuffleDataset,
+        PenmanDataset,
         MBartDataset,
         assert_all_frozen,
         use_task_specific_params,
@@ -315,6 +317,8 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--mlm_example_prob", type=float, default=0.)
 
         parser.add_argument("--resume_from_checkpont", type=str, default=None)
+
+        parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
         return parser
 
 
@@ -374,6 +378,14 @@ class ShuffledDataToTextModule(DataToTextModule):
             "mlm_example_prob": hparams.mlm_example_prob,
         })
 
+
+class AMRToTextModule(DataToTextModule):
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        self.dataset_class = PenmanDataset
+        self.dataset_kwargs.update({
+            "shuffle_eval": hparams.shuffle_graph_during_eval,
+            "graph_shuffling": hparams.amr_shuffling,
         })
 
 
@@ -395,6 +407,8 @@ def main(args, model=None) -> SummarizationModule:
                 model: SummarizationModule = DataToTextModule(args)
             else:
                 model: SummarizationModule = ShuffledDataToTextModule(args)
+        elif args.task == "amr-to-text":
+            model: SummarizationModule = AMRToTextModule(args)
 
     dataset = Path(args.data_dir).name
     if (
