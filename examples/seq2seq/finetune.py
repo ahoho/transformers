@@ -313,7 +313,8 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
         parser.add_argument("--reconstruct_graph_prob", type=float, default=0.)
         parser.add_argument("--mlm_example_prob", type=float, default=0.)
-    
+
+        parser.add_argument("--resume_from_checkpont", type=str, default=None)
         return parser
 
 
@@ -414,14 +415,17 @@ def main(args, model=None) -> SummarizationModule:
         logger = WandbLogger(name=model.output_dir.name, project=f"hf_{dataset}")
     if args.val_check_interval > 1:
         args.val_check_interval = int(args.val_check_interval)
+
     trainer: pl.Trainer = generic_train(
         model,
         args,
         logging_callback=Seq2SeqLoggingCallback(),
         checkpoint_callback=get_checkpoint_callback(args.output_dir, model.val_metric),
         logger=logger,
+        resume_from_checkpoint=args.resume_from_checkpoint,
         # TODO: early stopping callback seems messed up
     )
+
     pickle_save(model.hparams, model.output_dir / "hparams.pkl")
     if not args.do_predict:
         return model
