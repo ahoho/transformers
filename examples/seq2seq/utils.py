@@ -21,9 +21,9 @@ from torch.utils.data import Dataset, Sampler
 from transformers import BartTokenizer, T5Tokenizer
 
 
-def encode_line(tokenizer, line, max_length, pad_to_max_length=True, return_tensors="pt"):
+def encode_line(tokenizer, line, max_length, pad_to_max_length=True, return_tensors="pt", add_eos=True):
     extra_kw = {"add_prefix_space": True} if isinstance(tokenizer, BartTokenizer) else {}
-    line = f"{line} {tokenizer.eos_token}" if isinstance(tokenizer, T5Tokenizer) else line
+    line = f"{line} {tokenizer.eos_token}" if (isinstance(tokenizer, T5Tokenizer) and add_eos) else line
     return tokenizer(
         [line],
         max_length=max_length,
@@ -155,6 +155,7 @@ class KGShuffleDataset(Seq2SeqDataset):
         spo_regex="<[SPO]>[^<]+",
         shuffle_eval=False,
         reconstruct_graph_prob=0.,
+        mlm_example_prob=0.,
         eval_seed=42,
     ):
         super().__init__(
@@ -171,12 +172,13 @@ class KGShuffleDataset(Seq2SeqDataset):
         self.type_path = type_path
         self.eval_seed = eval_seed
         self.reconstruct_graph_prob = reconstruct_graph_prob if type_path == "train" else 0.
+        self.mlm_example_prob = mlm_example_prob if type_path == "train" else 0.
+
         if type_path == "train" or shuffle_eval:
             self.shuffle_components = shuffle_components
             self.shuffle_spo = shuffle_spo
             self.component_break = component_break
             self.spo_regex = spo_regex
-            self.shuffle_eval = shuffle_eval
         else:
             self.shuffle_components = False
             self.shuffle_spo = False
@@ -227,6 +229,34 @@ class KGShuffleDataset(Seq2SeqDataset):
 
         return source_line, target_line
 
+    def mask_target(self, source_line, tgt_line):
+        """
+        Mask out the node entities in the target sentence
+        """
+        # HACK: again, _very_ brittle, specific to WebNLG/T5
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        # get out all triples
+        components = re.split(self.component_break, source_line)
+        i = 0
+        tgt_line_context = tgt_line
+        tgt_line = ""
+
+        for triple in components:
+            if triple:
+                for entity in re.split("<[SPO]>", triple)[1:]:
+                    entity = entity.strip()
+                    if re.search(entity, tgt_line_context, flags=re.IGNORECASE):
+                        tgt_line_context = re.sub(
+                            entity, f"<extra_id_{i}>", tgt_line_context, flags=re.IGNORECASE
+                        )
+                        tgt_line = f"{tgt_line} <extra_id_{i}> {entity}"
+                        i += 1
+        
+        tgt_line = f"{tgt_line} <extra_id_{i}>"
+        source_line = f"{source_line} <relation> {tgt_line_context} </relation>"
+        return source_line, tgt_line
 
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
@@ -244,6 +274,10 @@ class KGShuffleDataset(Seq2SeqDataset):
             prefix = "reconstruct Graph: "
             source_eos = False
             source_line, tgt_line = self.mask_triples(source_line)
+        if random.random() < self.mlm_example_prob:
+            prefix = "complete Text with Graph: "
+            source_eos = False
+            source_line, tgt_line = self.mask_target(source_line, tgt_line)
 
         source_line = prefix + source_line
         source_inputs = encode_line(

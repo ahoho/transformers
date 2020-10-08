@@ -311,6 +311,7 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--shuffle_graph_subcomponents", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
         parser.add_argument("--reconstruct_graph_prob", type=float, default=0.)
+        parser.add_argument("--mlm_example_prob", type=float, default=0.)
     
         return parser
 
@@ -367,6 +368,9 @@ class ShuffledDataToTextModule(DataToTextModule):
             "shuffle_spo": hparams.shuffle_graph_subcomponents,
             "spo_regex": "<[SPO]>[^<]+",
             "reconstruct_graph_prob": hparams.reconstruct_graph_prob,
+            "mlm_example_prob": hparams.mlm_example_prob,
+        })
+
         })
 
 
@@ -383,6 +387,7 @@ def main(args, model=None) -> SummarizationModule:
             if (
                 not args.shuffle_graph_components
                 and args.reconstruct_graph_prob == 0.
+                and args.mlm_example_prob == 0.
             ):
                 model: SummarizationModule = DataToTextModule(args)
             else:
