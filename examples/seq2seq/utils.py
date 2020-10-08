@@ -12,9 +12,10 @@ from typing import Callable, Dict, Iterable, List
 
 import git
 import numpy as np
-import torch
 from rouge_score import rouge_scorer, scoring
 from sacrebleu import corpus_bleu
+from unidecode import unidecode
+
 from torch import nn
 from torch.utils.data import Dataset, Sampler
 
@@ -43,7 +44,20 @@ def calculate_bleu_score(output_lns, refs_lns, **kwargs) -> dict:
     """Uses sacrebleu's corpus_bleu implementation."""
     if not isinstance(refs_lns[0], list):
         refs_lns = [refs_lns]
-    return {"bleu": corpus_bleu(output_lns, refs_lns, **kwargs).score}
+    output_lns_normed = [
+        ' '.join(re.split('(\W)', unidecode(line.lower())))
+        for line in output_lns
+    ]
+    refs_lns_normed  = [
+        [
+            ' '.join(re.split('(\W)', unidecode(line.lower())))
+            for line in ref
+        ] for ref in refs_lns
+    ]
+    return {
+        "bleu": corpus_bleu(output_lns, refs_lns, **kwargs).score,
+        "bleu_normed": corpus_bleu(output_lns_normed, refs_lns_normed, **kwargs).score
+    }
 
 
 def trim_batch(
