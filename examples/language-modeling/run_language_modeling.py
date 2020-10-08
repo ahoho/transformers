@@ -20,6 +20,7 @@ using a masked language modeling (MLM) loss. XLNet is fine-tuned using a permuta
 """
 
 
+import io
 import logging
 import math
 import os
@@ -32,6 +33,7 @@ from transformers import (
     AutoConfig,
     AutoModelWithLMHead,
     AutoTokenizer,
+    BertTokenizer,
     DataCollatorForLanguageModeling,
     DataCollatorForPermutationLanguageModeling,
     HfArgumentParser,
@@ -94,6 +96,9 @@ class DataTrainingArguments:
     line_by_line: bool = field(
         default=False,
         metadata={"help": "Whether distinct lines of text in the dataset are to be handled as distinct sequences."},
+    )
+    additional_tokens_file: str = field(
+        default=None, metadata={"help": "File of new tokens to add"}
     )
 
     mlm: bool = field(
@@ -202,6 +207,12 @@ def main():
             "and load it from here, using --tokenizer_name"
         )
 
+    if data_args.additional_tokens_file:
+        with open(data_args.additional_tokens_file, "r") as infile:
+            additional_tokens = [l.strip() for l in infile]
+        #tokenizer.add_tokens(additional_tokens)
+        tokenizer = BertTokenizer(data_args.additional_tokens_file, do_basic_tokenize=False)
+    
     if model_args.model_name_or_path:
         model = AutoModelWithLMHead.from_pretrained(
             model_args.model_name_or_path,
