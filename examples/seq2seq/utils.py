@@ -293,16 +293,19 @@ class PenmanDataset(Seq2SeqDataset):
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
         graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
-        orig_graph_repr = graph_repr
 
         tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
         assert graph_repr, f"empty source line for index {index}"
         assert tgt_line, f"empty tgt line for index {index}"
 
+        orig_graph_repr = graph_repr
+        graph_repr = self.simplify_graph(graph_repr)
+
         # randomize the graph
         if self.graph_shuffling is not None:
             graph_repr = self.randomize_graph(orig_graph_repr, self.graph_shuffling)
-        
+            graph_repr = self.simplify_graph(graph_repr)
+
         # append a second representation, if desired
         if self.append_second_graph is not None:
             graph_repr_added = orig_graph_repr
@@ -310,12 +313,11 @@ class PenmanDataset(Seq2SeqDataset):
                 graph_repr_added = self.randomize_graph(
                     orig_graph_repr, self.append_second_graph
                 )
+            graph_repr_added = self.simplify_graph(graph_repr_added)
             graph_a, graph_b = graph_repr, graph_repr_added
             if self.type_path == "train" and random.random() > 0.5:
                 graph_a, graph_b = graph_b, graph_a
-            graph_repr = f"{graph_a} <GRAPH> {graph_b}" # should be added to tokenizer
-
-        graph_repr = self.simplify_graph(graph_repr)
+            graph_repr = f"{graph_a} <GRAPH> {graph_b}"
 
         source_line = self.prefix + graph_repr
         source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
