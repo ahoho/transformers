@@ -29,7 +29,8 @@ def generate_from_model(
 ) -> None:
     
     all_preds = []
-    for batch in tqdm(data_loader):
+    lls = []
+    for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
         pad_token_id = model.tokenizer.pad_token_id
         source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(batch, pad_token_id)
 
@@ -40,11 +41,17 @@ def generate_from_model(
             decoder_start_token_id=model.decoder_start_token_id,
             **gen_kwargs,
         )
+        with torch.no_grad():
+            y = y.masked_fill(y == 0, -100)
+            outputs = model.model(input_ids=source_ids, labels=y)
+            lls.append(outputs[0])
+
         preds = model.ids_to_clean_text(generated_ids)
         all_preds.extend(preds)
-        # TODO: add loss to output?
-    
-    return all_preds
+
+    ppl = torch.exp(torch.stack(lls).sum() / i).item()
+
+    return all_preds, ppl
 
 def val_tokenize(lines, tokenizer=None):
     """
@@ -119,10 +126,11 @@ def run_generate():
         type_path=args.type_path, batch_size=args.bs, shuffle=False
     )
     Path(args.output_dir).mkdir(exist_ok=True)
+    model.eval()
 
     # Make generations
     print("Generating...")
-    preds = generate_from_model(
+    preds, ppl = generate_from_model(
         data_loader=data_loader,
         model=model,
         output_dir=args.output_dir,
@@ -177,6 +185,7 @@ def run_generate():
         scores_normed = score_fn(preds_normed, reference_lns_normed)
         scores['bleu_normed'] = scores_normed['bleu']
 
+    scores['ppl'] = ppl
     save_json(scores, Path(args.output_dir, f"{args.type_path}-bleu.json"))
 
 
