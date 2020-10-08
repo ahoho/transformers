@@ -68,14 +68,15 @@ class SummarizationModule(BaseTransformer):
     metric_names = ROUGE_KEYS
     val_metric = "rouge2"
 
-    def __init__(self, hparams, **kwargs):
+    def __init__(self, hparams, save_hparams=True, **kwargs):
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
 
         use_task_specific_params(self.model, self.mode)
         save_git_info(self.hparams.output_dir)
         self.metrics_save_path = Path(self.output_dir) / "metrics.json"
         self.hparams_save_path = Path(self.output_dir) / "hparams.pkl"
-        pickle_save(self.hparams, self.hparams_save_path)
+        if save_hparams:
+            pickle_save(self.hparams, self.hparams_save_path)
         self.step_count = 0
         self.metrics = defaultdict(list)
 

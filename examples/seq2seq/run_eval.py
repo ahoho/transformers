@@ -94,7 +94,7 @@ def run_generate():
         prev_args.data_dir = args.data_dir
 
     if prev_args.task == "summarization":
-        model = SummarizationModule(prev_args)
+        model = SummarizationModule(prev_args, save_hparams=False)
     elif prev_args.task == "translation":
         model = TranslationModule(prev_args, save_hparams=False)
     elif prev_args.task == "data-to-text":
@@ -107,6 +107,10 @@ def run_generate():
         else:
             prev_args.reconstruct_graph_prob = 0.
             prev_args.mlm_example_prob = 0.
+            model: SummarizationModule = ShuffledDataToTextModule(prev_args, save_hparams=False)
+    if prev_args.task == "amr-to-text":
+        model: SummarizationModule = AMRToTextModule(prev_args, save_hparams=False)
+
     if args.type_path == 'test-unseen':
         model.n_obs['test-unseen'] = model.n_obs['test']
         model.target_lens['test-unseen'] = model.target_lens['test']
