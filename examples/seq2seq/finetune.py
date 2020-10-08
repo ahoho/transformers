@@ -33,7 +33,7 @@ try:
         ROUGE_KEYS,
         calculate_bleu_score,
         Seq2SeqDataset,
-        KGShuffleDataset,
+        WebNLGShuffleDataset,
         MBartDataset,
     )
 
@@ -41,7 +41,7 @@ try:
 except ImportError:
     from utils import (
         Seq2SeqDataset,
-        KGShuffleDataset,
+        WebNLGShuffleDataset,
         MBartDataset,
         assert_all_frozen,
         use_task_specific_params,
@@ -361,7 +361,7 @@ class DataToTextModule(SummarizationModule):
 class ShuffledDataToTextModule(DataToTextModule):
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams, **kwargs)
-        self.dataset_class = KGShuffleDataset
+        self.dataset_class = WebNLGShuffleDataset
         self.dataset_kwargs.update({
             "shuffle_eval": hparams.shuffle_graph_during_eval,
             "shuffle_components": hparams.shuffle_graph_components,

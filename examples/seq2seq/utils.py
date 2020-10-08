@@ -137,7 +137,8 @@ class Seq2SeqDataset(Dataset):
     def end_of_data_sampler(self):
         return EndSequentialSampler(len(self), end=self.lines_in_src_file)
 
-class KGShuffleDataset(Seq2SeqDataset):
+
+class WebNLGShuffleDataset(Seq2SeqDataset):
     """
     Shuffle linearized knowledge graphs (KG) by triple and, within each triple, by entity
     """
