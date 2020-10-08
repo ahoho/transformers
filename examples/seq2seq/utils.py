@@ -154,6 +154,7 @@ class KGShuffleDataset(Seq2SeqDataset):
         shuffle_spo=False,
         spo_regex="<[SPO]>[^<]+",
         shuffle_eval=False,
+        reconstruct_graph_prob=0.,
         eval_seed=42,
     ):
         super().__init__(
@@ -169,6 +170,7 @@ class KGShuffleDataset(Seq2SeqDataset):
         )
         self.type_path = type_path
         self.eval_seed = eval_seed
+        self.reconstruct_graph_prob = reconstruct_graph_prob if type_path == "train" else 0.
         if type_path == "train" or shuffle_eval:
             self.shuffle_components = shuffle_components
             self.shuffle_spo = shuffle_spo
@@ -185,10 +187,9 @@ class KGShuffleDataset(Seq2SeqDataset):
         Randomize the linearization of the graph
         """
         # TODO: this is pretty brittle, just change inputs to json or something
-        rng = None
-        if self.type_path in ["val", "test"]:
-            rng = self.eval_seed
+        rng = None if self.type_path == "train" else self.eval_seed
         random.seed(rng)
+
         components = re.split(self.component_break, source_line)
         components = [c for c in components if c]
         random.shuffle(components)
@@ -201,24 +202,56 @@ class KGShuffleDataset(Seq2SeqDataset):
                 shuffled_spo = " ".join(random.sample(spo_split, 3))
                 components_with_shuffled_spo.append(shuffled_spo)
             components = components_with_shuffled_spo
-
-        prefix = f"translate from graph to text: {self.component_break} "
-        source_line = prefix + self.component_break.join(components)
+        source_line = f" {self.component_break} ".join([''] + components)
         return source_line
+
+    def mask_triples(self, source_line):
+        """
+        Mask out a random triple
+        """
+        # HACK: again, _very_ brittle, specific to WebNLG/T5
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        # get out the triples, picking one
+        components = re.split(self.component_break, source_line)
+        components = [c for c in components if c]
+        triple_to_mask = random.choice(components)
+
+        # split the entities in the triple
+        entities = re.split("(<[SPO]>)", triple_to_mask)[1:]
+        assert((len(entities) == 6) & (entities[0] == "<S>"))
+        idx = random.choice([1, 3, 5])
+        source_line = ' '.join(entities[:idx] + ['<extra_id_0>'] + entities[idx+1:])
+        target_line = ' '.join(['<extra_id_0>', entities[idx], '<extra_id_1>' if idx < 5 else ''])
+
+        return source_line, target_line
+
 
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
         source_line = linecache.getline(str(self.src_file), index).rstrip("\n")
         tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
-
-        if self.shuffle_components:
-            source_line = self.shuffle_graph_components_in_line(source_line)
-
+        
         assert source_line, f"empty source line for index {index}"
         assert tgt_line, f"empty tgt line for index {index}"
 
-        source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
-        target_inputs = encode_line(self.tokenizer, tgt_line, self.max_target_length)
+        prefix = "translate Graph to Text: "
+        source_eos = True
+        if self.shuffle_components:
+            source_line = self.shuffle_graph_components_in_line(source_line)
+        if random.random() < self.reconstruct_graph_prob:
+            prefix = "reconstruct Graph: "
+            source_eos = False
+            source_line, tgt_line = self.mask_triples(source_line)
+
+        source_line = prefix + source_line
+        source_inputs = encode_line(
+            self.tokenizer, source_line, self.max_source_length, add_eos=source_eos
+        )
+        target_inputs = encode_line(
+            self.tokenizer, tgt_line, self.max_target_length, add_eos=True
+        )
 
         source_ids = source_inputs["input_ids"].squeeze()
         target_ids = target_inputs["input_ids"].squeeze()

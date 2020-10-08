@@ -98,10 +98,13 @@ def run_generate():
     elif prev_args.task == "translation":
         model = TranslationModule(prev_args)
     elif prev_args.task == "data-to-text":
-        if not prev_args.shuffle_graph_components:
-            model: SummarizationModule = DataToTextModule(prev_args)
+        if (
+            not prev_args.shuffle_graph_components
+            and getattr(prev_args, "reconstruct_graph_prob", 0) == 0.
+        ):
+            model: SummarizationModule = DataToTextModule(prev_args, save_hparams=False)
         else:
-            model: SummarizationModule = ShuffledDataToTextModule(prev_args)
+            prev_args.reconstruct_graph_prob = 0.
     if args.type_path == 'test-unseen':
         model.n_obs['test-unseen'] = model.n_obs['test']
         model.target_lens['test-unseen'] = model.target_lens['test']
