@@ -294,7 +294,7 @@ class SummarizationModule(BaseTransformer):
             required=True,
             help="The input data dir. Should contain train.source, train.target, val.source, val.target, test.source, test.target",
         )
-        parser.add_argument("--new_tokens_fpath", help="Path to json of additional tokens")
+        parser.add_argument("--new_tokens_fpath", default=None, help="Path to json of additional tokens")
         parser.add_argument("--freeze_encoder", action="store_true")
         parser.add_argument("--freeze_embeds", action="store_true")
         parser.add_argument("--sortish_sampler", action="store_true", default=False)
@@ -344,9 +344,10 @@ class DataToTextModule(SummarizationModule):
 
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams, **kwargs)
-        additional_tokens = load_json(hparams.new_tokens_fpath)
-        self.tokenizer.add_tokens(additional_tokens)
-        self.model.resize_token_embeddings(len(self.tokenizer))
+        if hparams.new_tokens_fpath:
+            additional_tokens = load_json(hparams.new_tokens_fpath)
+            self.tokenizer.add_tokens(additional_tokens)
+            self.model.resize_token_embeddings(len(self.tokenizer))
         self.model.config.update({
             'num_beams': hparams.num_beams,
             'max_length': 150,
