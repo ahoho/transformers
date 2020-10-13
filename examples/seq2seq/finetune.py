@@ -321,6 +321,11 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
         parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
     
+        parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
+        parser.add_argument("--amr_masking_mixture", type=float, default=0.5, help="Proportion of examples to apply masking to")
+        parser.add_argument("--graph_token_masking_prob", type=float, default=0.2, help="Masking probability of graph tokens")
+        parser.add_argument("--include_surface_in_masked_input", action="store_true", default=False, help="Include surface form alongside graph when masking")
+
         return parser
 
 
@@ -383,12 +388,21 @@ class ShuffledDataToTextModule(DataToTextModule):
 
 class AMRToTextModule(DataToTextModule):
     def __init__(self, hparams, **kwargs):
-        super().__init__(hparams, **kwargs)
+        super().__init__(hparams,  **kwargs)
+        prefix = "translate Graph to Text: " if hparams.amr_masking is not None else ""
+        self.model.config.update({
+            "prefix": prefix,
+        })
         self.dataset_class = PenmanDataset
         self.dataset_kwargs.update({
             "shuffle_eval": hparams.shuffle_graph_during_eval,
             "graph_shuffling": hparams.amr_shuffling,
             "append_second_graph": hparams.append_second_amr,
+            "prefix": prefix,
+            "graph_masking": hparams.amr_masking,
+            "graph_masking_mixture": hparams.amr_masking_mixture,
+            "graph_token_masking_prob": hparams.graph_token_masking_prob,
+            "surface_in_masked_input": hparams.include_surface_in_masked_input,
         })
 
 
@@ -396,6 +410,10 @@ def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     if len(os.listdir(args.output_dir)) > 3 and args.do_train:
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+
+    if args.amr_masking and args.append_second_amr:
+        raise NotImplementedError("Both masking & appending an AMR not yet supported")
+
     if model is None:
         if args.task == "summarization":
             model: SummarizationModule = SummarizationModule(args)

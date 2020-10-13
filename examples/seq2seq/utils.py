@@ -175,6 +175,10 @@ class PenmanDataset(Seq2SeqDataset):
         graph_shuffling=None,
         shuffle_eval=False,
         append_second_graph=None,
+        graph_masking=None,
+        graph_masking_mixture=0.5,
+        graph_token_masking_prob=0.2,
+        surface_in_masked_input=False,
         eval_seed=42,
     ):
         super().__init__(
@@ -185,7 +189,7 @@ class PenmanDataset(Seq2SeqDataset):
             type_path=type_path,
             n_obs=n_obs,
             src_lang=src_lang,
-            tgt_lang=src_lang,
+            tgt_lang=tgt_lang,
             prefix=prefix,
         )
         self.type_path = type_path
@@ -193,14 +197,24 @@ class PenmanDataset(Seq2SeqDataset):
         self.amr_codec = PENMANCodec()
         self.sense_pattern = re.compile('-[0-9][0-9]$')
         self.append_second_graph = append_second_graph
+        self.edge_types = set(
+            t for t in Path(self.src_file).read_text().split() if t.startswith(":")
+        )
+
+        # graph masking
+        self.graph_masking_mixture = graph_masking_mixture
+        self.graph_token_masking_prob = graph_token_masking_prob
+        self.surface_in_masked_input = surface_in_masked_input
 
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
+            self.graph_masking = graph_masking
         else:
             self.graph_shuffling = None
             self.append_second_graph = "canonical" if self.append_second_graph is not None else None
+            self.graph_masking = None
 
-    def randomize_graph(self, graph_repr, graph_shuffling):
+    def randomize_graph(self, graph_repr, graph_shuffling=None):
         """
         Randomize the graph while maintaining PENMAN notation
         """
@@ -221,6 +235,69 @@ class PenmanDataset(Seq2SeqDataset):
             new_repr = self.amr_codec.encode(graph_random)
     
         return new_repr
+
+    def mask_graph(self, clean_graph, raw_graph=None, surface=None):
+        """
+        Mask graph components in a "text-to-text" fashion
+
+        `self.graph_masking` behavior:
+            "components"
+            in:  ( want <X> ( boy ) :arg1  <Y> go :arg0 boy ) )
+            out: <X> :arg0 <Y> ( <Z>
+
+            "nodes"
+            in:  ( <X> :arg0 ( boy ) :arg1 ( go :arg0 <Y> ) )
+            out: <X> want <Y> boy <Z> 
+
+            "any"
+            in: ( <X> ( boy ) :arg1 <Y> go :arg0 boy ) )
+            out: <X> want :arg0 <Y> ( <Z>
+
+        If `self.surface_in_input` is True, then the surface form of the sentence is
+        also included
+        """
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        if self.graph_masking == "components":
+            components = {"(", ")"} | self.edge_types
+            masked_source, target = self.mask_example(clean_graph, components)
+        if self.graph_masking == "nodes":
+            raise NotImplementedError("Node masking not yet implemented")
+        if self.graph_masking == "any":
+            raise NotImplementedError("Node masking not yet implemented")
+
+        if self.surface_in_masked_input:
+            masked_source = f"{surface} <GRAPH> {masked_source}"
+
+        return masked_source, target
+
+    def mask_example(self, text, maskable_tokens=None):
+        """
+        Create a masked example from input text.
+
+        Confirmed to replicate `t5.data.preprocessorsnoise_span_to_unique_sentinel`
+        """
+        source_toks, target_toks = [], []
+        s_id, t_id = 0, 0
+        inside_masking_span = True
+
+        for tok in text.split():
+            maskable = tok in maskable_tokens if maskable_tokens is not None else True
+            if random.random() < self.graph_token_masking_prob and maskable:
+                if not inside_masking_span or len(target_toks) == 0:
+                    source_toks.append(f"<extra_id_{s_id}>")
+                    s_id += 1
+                target_toks.append(tok)
+                inside_masking_span = True
+            else:
+                if inside_masking_span:
+                    target_toks.append(f"<extra_id_{t_id}>")
+                    t_id += 1
+                source_toks.append(tok)
+                inside_masking_span = False
+
+        return " ".join(source_toks), " ".join(target_toks)
 
     def simplify_graph(self, graph_repr):
         """
@@ -292,37 +369,44 @@ class PenmanDataset(Seq2SeqDataset):
 
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
-        graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
 
-        tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
-        assert graph_repr, f"empty source line for index {index}"
-        assert tgt_line, f"empty tgt line for index {index}"
+        raw_graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
 
-        orig_graph_repr = graph_repr
-        graph_repr = self.simplify_graph(graph_repr)
+        target_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+        assert raw_graph_repr, f"empty source line for index {index}"
+        assert target_line, f"empty target line for index {index}"
+        prefix = self.prefix
 
         # randomize the graph
+        first_graph_repr = raw_graph_repr
         if self.graph_shuffling is not None:
-            graph_repr = self.randomize_graph(orig_graph_repr, self.graph_shuffling)
-            graph_repr = self.simplify_graph(graph_repr)
-
+            first_graph_repr = self.randomize_graph(raw_graph_repr, self.graph_shuffling) 
+        clean_graph_repr = self.simplify_graph(first_graph_repr)
+            
         # append a second representation, if desired
         if self.append_second_graph is not None:
-            graph_repr_added = orig_graph_repr
+            second_graph_repr = raw_graph_repr
             if self.append_second_graph != "canonical":
-                graph_repr_added = self.randomize_graph(
-                    orig_graph_repr, self.append_second_graph
+                second_graph_repr = self.randomize_graph(
+                    raw_graph_repr, self.append_second_graph
                 )
-            graph_repr_added = self.simplify_graph(graph_repr_added)
-            graph_a, graph_b = graph_repr, graph_repr_added
+            clean_second_graph_repr = self.simplify_graph(second_graph_repr)
+            graph_a, graph_b = clean_graph_repr, clean_second_graph_repr
             if self.type_path == "train" and random.random() > 0.5:
                 graph_a, graph_b = graph_b, graph_a
-            graph_repr = f"{graph_a} <GRAPH> {graph_b}"
+            clean_graph_repr = f"{graph_a} <GRAPH> {graph_b}"
+        
+        # include a masking objective
+        if self.graph_masking and random.random() < self.graph_masking_mixture:
+            prefix = "denoise Graph: " # TODO: do we need <eos> or not?
+            clean_graph_repr, target_line = self.mask_graph(
+                clean_graph_repr, raw_graph_repr, surface=target_line
+            )
 
-        source_line = self.prefix + graph_repr
+        source_line = prefix + clean_graph_repr
         source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
-        target_inputs = encode_line(self.tokenizer, tgt_line, self.max_target_length)
-
+        target_inputs = encode_line(self.tokenizer, target_line, self.max_target_length)
+        # TODO: drop if too long?
         source_ids = source_inputs["input_ids"].squeeze()
         target_ids = target_inputs["input_ids"].squeeze()
         src_mask = source_inputs["attention_mask"].squeeze()

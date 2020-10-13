@@ -1,5 +1,4 @@
 import argparse
-import json
 import sys
 from unidecode import unidecode
 from pathlib import Path
@@ -8,6 +7,7 @@ import re
 sys.path.append("..")
 
 import torch
+import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer, BertTokenizer, T5Tokenizer
 
@@ -21,37 +21,92 @@ except ImportError:
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def generate_from_model(
-    data_loader,
-    model,
-    device=DEFAULT_DEVICE,
-    **gen_kwargs,
-) -> None:
-    
+def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
     all_preds = []
     lls = []
+    
+    pad_token_id = model.tokenizer.pad_token_id
+
     for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
-        pad_token_id = model.tokenizer.pad_token_id
         source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(batch, pad_token_id)
 
-        generated_ids = model.model.generate(
-            input_ids=source_ids,
-            attention_mask=source_mask,
-            use_cache=True,
-            decoder_start_token_id=model.decoder_start_token_id,
-            **gen_kwargs,
-        )
-        with torch.no_grad():
-            y = y.masked_fill(y == 0, -100)
-            outputs = model.model(input_ids=source_ids, labels=y)
-            lls.append(outputs[0])
+        if generate:
+            generated_ids = model.model.generate(
+                input_ids=source_ids,
+                attention_mask=source_mask,
+                use_cache=True,
+                decoder_start_token_id=model.decoder_start_token_id,
+                **gen_kwargs,
+            )
+            preds = model.ids_to_clean_text(generated_ids)
+            all_preds.extend(preds)
 
-        preds = model.ids_to_clean_text(generated_ids)
-        all_preds.extend(preds)
+        y = y.masked_fill(y == pad_token_id, -100)
+        loss = calculate_batch_loss(model, source_ids, source_mask, y)
+        lls.append(loss)
+    
+    lls = torch.cat(lls)
+    ppl = torch.exp(lls.sum() / i).item()
 
-    ppl = torch.exp(torch.stack(lls).sum() / i).item()
+    return all_preds, lls.detach().numpy(), ppl
 
-    return all_preds, ppl
+
+def estimate_masked_amr_loss(model, type_path, bs, mode="bootstrap", n_samples=5):
+    """
+    Estimate the masked graph loss
+    """
+    model.dataset_kwargs.update({
+        'graph_masking_mixture': 1.,
+        'shuffle_eval': True,
+    })
+    pad_token_id = model.tokenizer.pad_token_id
+    sentinel_ids = model.tokenizer.additional_special_tokens_ids
+    labels_to_ignore = torch.tensor([pad_token_id] + sentinel_ids)
+
+    # OPTION A: bootstrapped estimate of sentence loss
+    if mode == "bootstrap":
+        sampled_lls = []
+        pbar = None
+        for i in range(n_samples):
+            model.dataset_kwargs['eval_seed'] = i ** i
+            data_loader = model.get_dataloader(
+                type_path=type_path, batch_size=bs, shuffle=False
+            )
+            lls = []
+            if pbar is None:
+                pbar = tqdm(total=n_samples * len(data_loader))
+
+            # calculate loss
+            for batch in data_loader:
+                source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(
+                    batch, pad_token_id
+                )
+                mask = (y[..., None] == labels_to_ignore).any(-1)
+                y = y.masked_fill(mask, -100)
+                loss = calculate_batch_loss(model, source_ids, source_mask, y)
+                lls.append(loss)
+                pbar.update()
+            sampled_lls.append(torch.cat(lls))
+        return torch.stack(sampled_lls).detach().numpy().T
+    
+    # OPTION B: mask all
+    if mode == "mask_all":
+        # prev_args.graph_token_masking_prob = 1.
+        raise NotImplementedError("Not yet implemented")
+
+def calculate_batch_loss(model, input_ids, attention_mask, labels):
+    """
+    Report cross-entropy loss for each item in the bass
+    """
+    mask = labels != -100
+    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
+    with torch.no_grad():
+        out = model.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = loss_fct(out.logits.view(-1, out.logits.size(-1)), labels.view(-1))
+        loss = loss.view(out.logits.size(0), -1)
+        loss = loss.sum(-1) / mask.sum(-1)
+
+    return loss
 
 def val_tokenize(lines, tokenizer=None):
     """
@@ -83,8 +138,12 @@ def run_generate():
     parser.add_argument("--device", type=str, required=False, default=DEFAULT_DEVICE, help="cuda, cuda:1, cpu etc.")
     parser.add_argument("--bs", type=int, default=8, required=False, help="batch size")
     parser.add_argument("--shuffle_graph_components", default=False, required=False, action="store_true")
+    parser.add_argument("--do_not_generate", dest="generate", default=True, action="store_false")
+    parser.add_argument("--save_sentence_losses", default=False, action="store_true")
     parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
     parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
+
+    parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
     )
@@ -97,19 +156,24 @@ def run_generate():
     prev_args.output_dir = str(args.model_dir)
 
     prev_args.shuffle_graph_components = args.shuffle_graph_components
-    trained_with_second_amr = hasattr(prev_args, "append_second_amr")
+    trained_with_second_amr = getattr(prev_args, "append_second_amr", None)
     prev_args.append_second_amr = args.append_second_amr
     if trained_with_second_amr and args.append_second_amr is None:
         print("Trained with a second AMR, but not set during evaluation")
 
     prev_args.amr_shuffling = args.amr_shuffling
+
     prev_args.shuffle_graph_during_eval = (
         args.shuffle_graph_components or 
         args.amr_shuffling is not None or
         args.append_second_amr not in [None, "canonical"]
     )
-
     setattr(prev_args, f"n_{args.type_path}", args.n_obs)
+    
+    # backward-compatibility TODO: check if ok
+    prev_args.amr_masking = getattr(prev_args, "amr_masking", args.amr_masking)
+    prev_args.graph_token_masking_prob = getattr(prev_args, "graph_token_masking_prob", None)
+    prev_args.include_surface_in_masked_input = getattr(prev_args, "include_surface_in_masked_input", None)
 
     if args.data_dir is not None:
         prev_args.data_dir = args.data_dir
@@ -130,6 +194,7 @@ def run_generate():
             prev_args.mlm_example_prob = 0.
             model: SummarizationModule = ShuffledDataToTextModule(prev_args, save_hparams=False)
     if prev_args.task == "amr-to-text":
+        prev_args.amr_masking_mixture = 0.
         model: SummarizationModule = AMRToTextModule(prev_args, save_hparams=False)
 
     if args.type_path == 'test-unseen':
@@ -142,14 +207,15 @@ def run_generate():
     Path(args.output_dir).mkdir(exist_ok=True)
     model.eval()
 
-    # Make generations
+    # Generate & compute loss
     print("Generating...")
-    preds, ppl = generate_from_model(
-        data_loader=data_loader,
-        model=model,
-        output_dir=args.output_dir,
-        device=args.device,
-    )
+    preds, gen_lls, ppl = generate_from_model(data_loader, model, generate=args.generate)
+
+    # also calculate loss for masked graph objective
+    if args.save_sentence_losses and prev_args.amr_masking is not None:
+        mask_lls = estimate_masked_amr_loss(
+            model, args.type_path, bs=args.bs, n_samples=5
+        )
     
     if args.shuffle_graph_components: # append "shuffled" if shuffling
         args.type_path = f"{args.type_path}-shuffled"
@@ -161,6 +227,14 @@ def run_generate():
         args.type_path = f"{Path(args.data_dir).name}-{args.type_path}"
 
     pickle_save(args, Path(args.output_dir, f"{args.type_path}-hparams.pkl"))
+
+    if args.save_sentence_losses:
+        np.save(Path(args.output_dir, f"{args.type_path}-gen_lls.npy"), gen_lls)
+        if prev_args.amr_masking is not None:
+            np.save(Path(args.output_dir, f"{args.type_path}-mask_lls.npy"), mask_lls)
+
+    if not args.generate:
+        return None
 
     with open(Path(args.output_dir, f"{args.type_path}.pred"), "w") as outfile:
         for sent in preds:
