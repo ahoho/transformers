@@ -405,6 +405,16 @@ class AMRToTextModule(DataToTextModule):
             "surface_in_masked_input": hparams.include_surface_in_masked_input,
         })
 
+    def _step(self, batch: dict) -> Tuple:
+        """
+        T5-specific training step
+        """
+        source_ids, source_mask, y = batch["input_ids"], batch["attention_mask"], batch["decoder_input_ids"]
+        mask = y == self.tokenizer.pad_token_id
+        y = y.masked_fill(mask, -100)
+        outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
+        return (outputs[0], )
+
 
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
