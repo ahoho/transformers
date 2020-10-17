@@ -249,7 +249,7 @@ class PenmanDataset(Seq2SeqDataset):
             in:  ( <X> :arg0 ( boy ) :arg1 ( go :arg0 <Y> ) )
             out: <X> want <Y> boy <Z> 
 
-            "any"
+            "all"
             in: ( <X> ( boy ) :arg1 <Y> go :arg0 boy ) )
             out: <X> want :arg0 <Y> ( <Z>
 
@@ -264,8 +264,8 @@ class PenmanDataset(Seq2SeqDataset):
             masked_source, target = self.mask_example(clean_graph, components)
         if self.graph_masking == "nodes":
             raise NotImplementedError("Node masking not yet implemented")
-        if self.graph_masking == "any":
-            raise NotImplementedError("Node masking not yet implemented")
+        if self.graph_masking == "all":
+            masked_source, target = self.mask_example(clean_graph)
 
         if self.surface_in_masked_input:
             masked_source = f"{surface} <GRAPH> {masked_source}"
