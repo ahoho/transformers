@@ -404,6 +404,7 @@ class AMRToTextModule(DataToTextModule):
             "graph_token_masking_prob": hparams.graph_token_masking_prob,
             "surface_in_masked_input": hparams.include_surface_in_masked_input,
         })
+        self.tokens_to_mask = torch.tensor(
 
     def _step(self, batch: dict) -> Tuple:
         """

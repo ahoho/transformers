@@ -209,6 +209,9 @@ class PenmanDataset(Seq2SeqDataset):
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
             self.graph_masking = graph_masking
+        elif graph_masking_mixture == 1:
+            self.graph_shuffling = None
+            self.graph_masking = graph_masking
         else:
             self.graph_shuffling = None
             self.append_second_graph = "canonical" if self.append_second_graph is not None else None
