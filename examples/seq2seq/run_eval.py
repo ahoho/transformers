@@ -81,7 +81,8 @@ def estimate_masked_amr_loss(model, type_path, bs, mode="bootstrap", n_samples=5
                 source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(
                     batch, pad_token_id
                 )
-                mask = (y[..., None] == labels_to_ignore).any(-1)
+                #mask = (y[..., None] == labels_to_ignore).any(-1)
+                mask = y == pad_token_id
                 y = y.masked_fill(mask, -100)
                 loss = calculate_batch_loss(model, source_ids, source_mask, y)
                 lls.append(loss)
