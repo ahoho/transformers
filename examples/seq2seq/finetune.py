@@ -405,6 +405,11 @@ class AMRToTextModule(DataToTextModule):
             "surface_in_masked_input": hparams.include_surface_in_masked_input,
         })
         self.tokens_to_mask = torch.tensor(
+            self.tokenizer.additional_special_tokens_ids + [self.tokenizer.pad_token_id]
+        )
+        if hparams.amr_masking_mixture == 1:
+            self.val_metric = "loss"
+            self.metric_names = ["loss"] 
 
     def _step(self, batch: dict) -> Tuple:
         """
@@ -416,6 +421,25 @@ class AMRToTextModule(DataToTextModule):
         outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
         return (outputs[0], )
 
+    def validation_step(self, batch, batch_idx) -> Dict:
+        if self.metric_names == ["loss"]:
+            # if only masking, then do not generate
+            loss_tensors = self._step(batch)
+            return {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
+        return super()._generative_step(batch, batch_id)
+
+    def validation_epoch_end(self, outputs, prefix="val") -> Dict:
+        if self.metric_names == ["loss"]:
+            self.step_count += 1
+            losses = {k: torch.stack([x[k] for x in outputs]).mean().item() for k in self.loss_names}
+            loss = losses["loss"]
+            val_metric = losses[self.val_metric]
+            metrics = {f"{prefix}_avg_{k}": x for k, x in losses.items()}
+            metrics["step_count"] = self.step_count
+            self.save_metrics(metrics, prefix)  # writes to self.metrics_save_path
+            return {"log": metrics, f"{prefix}_loss": loss, f"{prefix}_{self.val_metric}": val_metric}
+        return super().validation_epoch_end(outputs, prefix)
+        
 
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
