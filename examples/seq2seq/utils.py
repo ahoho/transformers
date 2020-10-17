@@ -376,6 +376,7 @@ class PenmanDataset(Seq2SeqDataset):
         assert raw_graph_repr, f"empty source line for index {index}"
         assert target_line, f"empty target line for index {index}"
         prefix = self.prefix
+        add_eos = True
 
         # randomize the graph
         first_graph_repr = raw_graph_repr
@@ -402,9 +403,10 @@ class PenmanDataset(Seq2SeqDataset):
             clean_graph_repr, target_line = self.mask_graph(
                 clean_graph_repr, raw_graph_repr, surface=target_line
             )
+            add_eos = False
 
         source_line = prefix + clean_graph_repr
-        source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length)
+        source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length, add_eos=add_eos)
         target_inputs = encode_line(self.tokenizer, target_line, self.max_target_length)
         # TODO: drop if too long?
         source_ids = source_inputs["input_ids"].squeeze()
