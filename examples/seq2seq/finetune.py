@@ -320,8 +320,11 @@ class SummarizationModule(BaseTransformer):
 
         parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
         parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
-    
+        parser.add_argument("--do_not_shuffle_during_gen", action="store_true", default=False)
+
         parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
+        parser.add_argument("--amr_reordering", choices=["reorder", "generate"], default=None)
+
         parser.add_argument("--amr_masking_mixture", type=float, default=0.5, help="Proportion of examples to apply masking to")
         parser.add_argument("--graph_token_masking_prob", type=float, default=0.2, help="Masking probability of graph tokens")
         parser.add_argument("--include_surface_in_masked_input", action="store_true", default=False, help="Include surface form alongside graph when masking")
