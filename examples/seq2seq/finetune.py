@@ -427,9 +427,9 @@ class AMRToTextModule(DataToTextModule):
         self.tokens_to_mask = torch.tensor(
             self.tokenizer.additional_special_tokens_ids + [self.tokenizer.pad_token_id]
         )
-        if hparams.amr_masking_mixture == 1:
+        if hparams.amr_masking_mixture == 1 and hparams.amr_masking:
             self.val_metric = "loss"
-            self.metric_names = ["loss"] 
+            self.metric_names = ["loss"]
 
     def _step(self, batch: dict) -> Tuple:
         """
