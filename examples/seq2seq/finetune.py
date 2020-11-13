@@ -385,6 +385,15 @@ class ShuffledDataToTextModule(DataToTextModule):
             "mlm_example_prob": hparams.mlm_example_prob,
         })
 
+    def _step(self, batch: dict) -> Tuple:
+        """
+        T5-specific training step
+        """
+        source_ids, source_mask, y = batch["input_ids"], batch["attention_mask"], batch["decoder_input_ids"]
+        mask = y == self.tokenizer.pad_token_id
+        y = y.masked_fill(mask, -100)
+        outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
+        return (outputs[0], )
 
 class AMRToTextModule(DataToTextModule):
     def __init__(self, hparams, **kwargs):
