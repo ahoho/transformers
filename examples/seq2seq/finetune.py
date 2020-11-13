@@ -409,6 +409,7 @@ class AMRToTextModule(DataToTextModule):
             "append_second_graph": hparams.append_second_amr,
             "prefix": prefix,
             "graph_masking": hparams.amr_masking,
+            "graph_reordering": getattr(hparams, "amr_reordering", None),
             "graph_masking_mixture": hparams.amr_masking_mixture,
             "graph_token_masking_prob": hparams.graph_token_masking_prob,
             "surface_in_masked_input": hparams.include_surface_in_masked_input,

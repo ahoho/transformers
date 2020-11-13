@@ -173,6 +173,8 @@ class PenmanDataset(Seq2SeqDataset):
         tgt_lang=None,
         prefix="",
         graph_shuffling=None,
+        graph_reordering=False,
+        shuffle_during_gen=True,
         shuffle_eval=False,
         append_second_graph=None,
         graph_masking=None,
@@ -196,6 +198,7 @@ class PenmanDataset(Seq2SeqDataset):
         self.eval_seed = eval_seed
         self.amr_codec = PENMANCodec()
         self.sense_pattern = re.compile('-[0-9][0-9]$')
+        self.shuffle_during_gen = shuffle_during_gen
         self.append_second_graph = append_second_graph
         self.edge_types = set(
             t for t in Path(self.src_file).read_text().split() if t.startswith(":")
@@ -209,13 +212,16 @@ class PenmanDataset(Seq2SeqDataset):
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
             self.graph_masking = graph_masking
+            self.graph_reordering = graph_reordering
         elif graph_masking_mixture == 1:
             self.graph_shuffling = None
             self.graph_masking = graph_masking
+            self.graph_reordering = None
         else:
             self.graph_shuffling = None
             self.append_second_graph = "canonical" if self.append_second_graph is not None else None
             self.graph_masking = None
+            self.graph_reordering = None
 
     def randomize_graph(self, graph_repr, graph_shuffling=None):
         """
@@ -381,9 +387,11 @@ class PenmanDataset(Seq2SeqDataset):
         prefix = self.prefix
         add_eos = True
 
+        # use a graph-completion (masking or reorder) objective
+        do_graph_completion = random.random() < self.graph_masking_mixture
         # randomize the graph
         first_graph_repr = raw_graph_repr
-        if self.graph_shuffling is not None:
+        if self.graph_shuffling is not None and (self.shuffle_during_gen or do_graph_completion):
             first_graph_repr = self.randomize_graph(raw_graph_repr, self.graph_shuffling) 
         clean_graph_repr = self.simplify_graph(first_graph_repr)
             
@@ -401,12 +409,20 @@ class PenmanDataset(Seq2SeqDataset):
             clean_graph_repr = f"{graph_a} <GRAPH> {graph_b}"
         
         # include a masking objective
-        if self.graph_masking and random.random() < self.graph_masking_mixture:
+        if self.graph_masking and do_graph_completion:
             prefix = "denoise Graph: " # TODO: do we need <eos> or not?
             clean_graph_repr, target_line = self.mask_graph(
                 clean_graph_repr, raw_graph_repr, surface=target_line
             )
             add_eos = False
+
+        # reorder a shuffled input
+        if self.graph_reordering and do_graph_completion:
+            if self.graph_masking_mixture < 1:
+                # TODO: bit hacky, don't want different prefixed for always-reorder case
+                prefix = "order Graph: "
+            tgt = self.simplify_graph(raw_graph_repr)
+            target_line = f"{target_line} <GRAPH> {tgt}" if self.graph_reordering == "generate" else tgt
 
         source_line = prefix + clean_graph_repr
         source_inputs = encode_line(self.tokenizer, source_line, self.max_source_length, add_eos=add_eos)

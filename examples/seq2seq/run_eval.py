@@ -173,6 +173,7 @@ def run_generate():
     
     # backward-compatibility TODO: check if ok
     prev_args.amr_masking = getattr(prev_args, "amr_masking", args.amr_masking)
+    prev_args.amr_reordering = getattr(prev_args, "amr_reordering", None)
     prev_args.graph_token_masking_prob = getattr(prev_args, "graph_token_masking_prob", None)
     prev_args.include_surface_in_masked_input = getattr(prev_args, "include_surface_in_masked_input", None)
 
