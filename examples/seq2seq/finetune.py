@@ -313,6 +313,7 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--shuffle_graph_components", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_subcomponents", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_consistently", action="store_true", default=False)
         parser.add_argument("--reconstruct_graph_prob", type=float, default=0.)
         parser.add_argument("--mlm_example_prob", type=float, default=0.)
 
@@ -411,6 +412,7 @@ class AMRToTextModule(DataToTextModule):
         self.dataset_class = PenmanDataset
         self.dataset_kwargs.update({
             "shuffle_eval": hparams.shuffle_graph_during_eval,
+            "shuffle_consistently": getattr(hparams, "shuffle_graph_consistently", False),
             "graph_shuffling": hparams.amr_shuffling,
             "shuffle_during_gen": not getattr(hparams, "do_not_shuffle_during_gen", False),
             "append_second_graph": hparams.append_second_amr,

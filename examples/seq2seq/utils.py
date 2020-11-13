@@ -176,6 +176,7 @@ class PenmanDataset(Seq2SeqDataset):
         graph_reordering=False,
         shuffle_during_gen=True,
         shuffle_eval=False,
+        shuffle_consistently=False,
         append_second_graph=None,
         graph_masking=None,
         graph_masking_mixture=0.5,
@@ -200,6 +201,7 @@ class PenmanDataset(Seq2SeqDataset):
         self.amr_codec = PENMANCodec()
         self.sense_pattern = re.compile('-[0-9][0-9]$')
         self.shuffle_during_gen = shuffle_during_gen
+        self.shuffle_consistently = shuffle_consistently
         self.append_second_graph = append_second_graph
         self.edge_types = set(
             t for t in Path(self.src_file).read_text().split() if t.startswith(":")
@@ -230,7 +232,7 @@ class PenmanDataset(Seq2SeqDataset):
         """
         Randomize the graph while maintaining PENMAN notation
         """
-        rng = None if self.type_path == "train" else self.eval_seed
+        rng = None if self.type_path == "train" and not self.shuffle_consistently else self.eval_seed
         random.seed(rng)
         
         if graph_shuffling == "rearrange":
