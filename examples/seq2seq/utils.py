@@ -181,6 +181,7 @@ class PenmanDataset(Seq2SeqDataset):
         graph_masking_mixture=0.5,
         graph_token_masking_prob=0.2,
         surface_in_masked_input=False,
+        batch_by_task=False,
         eval_seed=42,
     ):
         super().__init__(
@@ -208,6 +209,7 @@ class PenmanDataset(Seq2SeqDataset):
         self.graph_masking_mixture = graph_masking_mixture
         self.graph_token_masking_prob = graph_token_masking_prob
         self.surface_in_masked_input = surface_in_masked_input
+        self.batch_by_task = batch_by_task
 
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
@@ -376,6 +378,12 @@ class PenmanDataset(Seq2SeqDataset):
         # TODO
         pass
 
+    def collate_fn(self, batch) -> Dict[str, torch.Tensor]:
+        batch = super().collate_fn(batch)
+        batch["complete_graph"] = self.do_graph_completion_batch
+        self.do_graph_completion_batch = random.random() < self.graph_masking_mixture
+        return batch
+
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
 
@@ -389,6 +397,9 @@ class PenmanDataset(Seq2SeqDataset):
 
         # use a graph-completion (masking or reorder) objective
         do_graph_completion = random.random() < self.graph_masking_mixture
+        if self.batch_by_task:
+            do_graph_completion = self.do_graph_completion_batch # set in `collate_fn()`
+
         # randomize the graph
         first_graph_repr = raw_graph_repr
         if self.graph_shuffling is not None and (self.shuffle_during_gen or do_graph_completion):

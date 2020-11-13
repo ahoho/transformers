@@ -328,6 +328,7 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--amr_masking_mixture", type=float, default=0.5, help="Proportion of examples to apply masking to")
         parser.add_argument("--graph_token_masking_prob", type=float, default=0.2, help="Masking probability of graph tokens")
         parser.add_argument("--include_surface_in_masked_input", action="store_true", default=False, help="Include surface form alongside graph when masking")
+        parser.add_argument("--batch_by_task", action="store_true", default=False, help="Perform tasks (masking, reordering) batch-by-batch")
 
         return parser
 
@@ -419,6 +420,7 @@ class AMRToTextModule(DataToTextModule):
             "graph_masking_mixture": hparams.amr_masking_mixture,
             "graph_token_masking_prob": hparams.graph_token_masking_prob,
             "surface_in_masked_input": hparams.include_surface_in_masked_input,
+            "batch_by_task": getattr(hparams, "batch_by_task", False),
         })
         self.tokens_to_mask = torch.tensor(
             self.tokenizer.additional_special_tokens_ids + [self.tokenizer.pad_token_id]
