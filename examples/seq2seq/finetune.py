@@ -401,7 +401,9 @@ class ShuffledDataToTextModule(DataToTextModule):
 class AMRToTextModule(DataToTextModule):
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams,  **kwargs)
-        prefix = "translate Graph to Text: " if hparams.amr_masking is not None else ""
+        prefix = "" # if only generating, no need for a prefix
+        if hparams.amr_masking or hparams.amr_reordering:
+            prefix = "translate Graph to Text: "
         self.model.config.update({
             "prefix": prefix,
         })
@@ -409,6 +411,7 @@ class AMRToTextModule(DataToTextModule):
         self.dataset_kwargs.update({
             "shuffle_eval": hparams.shuffle_graph_during_eval,
             "graph_shuffling": hparams.amr_shuffling,
+            "shuffle_during_gen": not getattr(hparams, "do_not_shuffle_during_gen", False),
             "append_second_graph": hparams.append_second_amr,
             "prefix": prefix,
             "graph_masking": hparams.amr_masking,
@@ -439,7 +442,7 @@ class AMRToTextModule(DataToTextModule):
             # if only masking, then do not generate
             loss_tensors = self._step(batch)
             return {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
-        return super()._generative_step(batch, batch_id)
+        return super().validation_step(batch, batch_idx)
 
     def validation_epoch_end(self, outputs, prefix="val") -> Dict:
         if self.metric_names == ["loss"]:
