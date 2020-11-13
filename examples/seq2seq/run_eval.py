@@ -39,6 +39,7 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
                 **gen_kwargs,
             )
             preds = model.ids_to_clean_text(generated_ids)
+            preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
             all_preds.extend(preds)
 
         y = y.masked_fill(y == pad_token_id, -100)
