@@ -210,6 +210,7 @@ class PenmanDataset(Seq2SeqDataset):
         self.graph_token_masking_prob = graph_token_masking_prob
         self.surface_in_masked_input = surface_in_masked_input
         self.batch_by_task = batch_by_task
+        self.do_graph_completion_batch = False # start false
 
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
