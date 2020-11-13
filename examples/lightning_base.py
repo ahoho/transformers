@@ -9,6 +9,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from transformers import (
     AdamW,
+    Adafactor,
     AutoConfig,
     AutoModel,
     AutoModelForPreTraining,
@@ -106,7 +107,14 @@ class BaseTransformer(pl.LightningModule):
                 "weight_decay": 0.0,
             },
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
+        if self.hparams.adafactor:
+            optimizer = Adafactor(
+                optimizer_grouped_parameters, lr=self.hparams.learning_rate, scale_parameter=False, relative_step=False
+            )
+        else:
+            optimizer = AdamW(
+                optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
+            )
         self.opt = optimizer
 
         scheduler = get_linear_schedule_with_warmup(
@@ -226,6 +234,14 @@ def add_generic_args(parser, root_dir) -> None:
         type=str,
         required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
+    )
+
+    parser.add_argument(
+        "--adafactor",
+        action="store_true",
+        default=False,
+        help="Use fairseq implementation of Adafactor"
+        # https://discuss.huggingface.co/t/t5-finetuning-tips/684/3
     )
 
     parser.add_argument(
