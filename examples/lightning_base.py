@@ -275,8 +275,6 @@ class BaseTransformer(pl.LightningModule):
         parser.add_argument("--num_train_epochs", dest="max_epochs", default=3, type=int)
         parser.add_argument("--train_batch_size", default=32, type=int)
         parser.add_argument("--eval_batch_size", default=32, type=int)
-        parser.add_argument("--adafactor", action="store_true")
-
 
 class LoggingCallback(pl.Callback):
     def on_batch_end(self, trainer, pl_module):

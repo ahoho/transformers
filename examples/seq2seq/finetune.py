@@ -37,6 +37,7 @@ from utils import (
     pickle_save,
     save_git_info,
     save_json,
+    load_json,
     use_task_specific_params,
 )
 
@@ -55,7 +56,7 @@ class SummarizationModule(BaseTransformer):
     metric_names = ROUGE_KEYS
     default_val_metric = "rouge2"
 
-    def __init__(self, hparams, **kwargs):
+    def __init__(self, hparams, save_hparams=True, **kwargs):
         if hparams.sortish_sampler and hparams.gpus > 1:
             hparams.replace_sampler_ddp = False
         elif hparams.max_tokens_per_batch is not None:
@@ -175,7 +176,7 @@ class SummarizationModule(BaseTransformer):
 
         logs = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
         # tokens per batch
-        logs["tpb"] = batch["input_ids"].ne(self.pad).sum() + batch["labels"].ne(self.pad).sum()
+        logs["tpb"] = batch["input_ids"].ne(self.pad).sum() + batch["decoder_input_ids"].ne(self.pad).sum()
         logs["bs"] = batch["input_ids"].shape[0]
         logs["src_pad_tok"] = batch["input_ids"].eq(self.pad).sum()
         logs["src_pad_frac"] = batch["input_ids"].eq(self.pad).float().mean()
@@ -226,7 +227,7 @@ class SummarizationModule(BaseTransformer):
         )
         gen_time = (time.time() - t0) / batch["input_ids"].shape[0]
         preds: List[str] = self.ids_to_clean_text(generated_ids)
-        target: List[str] = self.ids_to_clean_text(batch["labels"])
+        target: List[str] = self.ids_to_clean_text(batch["decoder_input_ids"])
         loss_tensors = self._step(batch)
         base_metrics = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
         rouge: Dict = self.calc_generative_metrics(preds, target)
@@ -403,7 +404,7 @@ class DataToTextModule(SummarizationModule):
     mode = "data-to-text"
     loss_names = ["loss"]
     metric_names = ["bleu"]
-    val_metric = "bleu"
+    default_val_metric = "bleu"
 
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams, **kwargs)
@@ -412,14 +413,14 @@ class DataToTextModule(SummarizationModule):
             self.tokenizer.add_tokens(additional_tokens)
             self.model.resize_token_embeddings(len(self.tokenizer))
         self.model.config.update({
-            'num_beams': hparams.num_beams,
+            'num_beams': hparams.eval_beams,
             'max_length': 150,
             'prefix': '', #'translate Graph to Text: '
         })
         self.dataset_kwargs['prefix'] = self.model.config.prefix
 
     def calc_generative_metrics(self, preds, target) -> dict:
-        return calculate_bleu_score(preds, target)
+        return calculate_bleu(preds, target)
 
 
 class ShuffledDataToTextModule(DataToTextModule):
@@ -473,9 +474,6 @@ class AMRToTextModule(DataToTextModule):
         self.tokens_to_mask = torch.tensor(
             self.tokenizer.additional_special_tokens_ids + [self.tokenizer.pad_token_id]
         )
-        if hparams.amr_masking_mixture == 1 and hparams.amr_masking:
-            self.val_metric = "loss"
-            self.metric_names = ["loss"]
 
     def _step(self, batch: dict) -> Tuple:
         """
@@ -486,25 +484,6 @@ class AMRToTextModule(DataToTextModule):
         y = y.masked_fill(mask, -100)
         outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
         return (outputs[0], )
-
-    def validation_step(self, batch, batch_idx) -> Dict:
-        if self.metric_names == ["loss"]:
-            # if only masking, then do not generate
-            loss_tensors = self._step(batch)
-            return {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
-        return super().validation_step(batch, batch_idx)
-
-    def validation_epoch_end(self, outputs, prefix="val") -> Dict:
-        if self.metric_names == ["loss"]:
-            self.step_count += 1
-            losses = {k: torch.stack([x[k] for x in outputs]).mean().item() for k in self.loss_names}
-            loss = losses["loss"]
-            val_metric = losses[self.val_metric]
-            metrics = {f"{prefix}_avg_{k}": x for k, x in losses.items()}
-            metrics["step_count"] = self.step_count
-            self.save_metrics(metrics, prefix)  # writes to self.metrics_save_path
-            return {"log": metrics, f"{prefix}_loss": loss, f"{prefix}_{self.val_metric}": val_metric}
-        return super().validation_epoch_end(outputs, prefix)
         
 
 def main(args, model=None) -> SummarizationModule:
