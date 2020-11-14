@@ -11,6 +11,7 @@ from pytorch_lightning.utilities import rank_zero_info
 import pkg_resources
 from transformers import (
     AdamW,
+    Adafactor,
     AutoConfig,
     AutoModel,
     AutoModelForPreTraining,
@@ -55,6 +56,7 @@ MODEL_MODES = {
     "language-modeling": AutoModelWithLMHead,
     "summarization": AutoModelForSeq2SeqLM,
     "translation": AutoModelForSeq2SeqLM,
+    "data-to-text": AutoModelForSeq2SeqLM,
 }
 
 
@@ -155,7 +157,6 @@ class BaseTransformer(pl.LightningModule):
             optimizer = Adafactor(
                 optimizer_grouped_parameters, lr=self.hparams.learning_rate, scale_parameter=False, relative_step=False
             )
-
         else:
             optimizer = AdamW(
                 optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
@@ -313,6 +314,14 @@ def add_generic_args(parser, root_dir) -> None:
         required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
+    parser.add_argument(
+        "--adafactor",
+        action="store_true",
+        default=False,
+        help="Use fairseq implementation of Adafactor"
+        # https://discuss.huggingface.co/t/t5-finetuning-tips/684/3
+    )
+
     parser.add_argument(
         "--fp16",
         action="store_true",

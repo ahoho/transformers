@@ -321,12 +321,10 @@ class Adafactor(Optimizer):
     """
     AdaFactor pytorch implementation can be used as a drop in replacement for Adam original fairseq code:
     https://github.com/pytorch/fairseq/blob/master/fairseq/optim/adafactor.py
-
     Paper: `Adafactor: Adaptive Learning Rates with Sublinear Memory Cost` https://arxiv.org/abs/1804.04235 Note that
     this optimizer internally adjusts the learning rate depending on the *scale_parameter*, *relative_step* and
     *warmup_init* options. To use a manual (external) learning rate schedule you should set `scale_parameter=False` and
     `relative_step=False`.
-
     Arguments:
         params (:obj:`Iterable[torch.nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
@@ -443,7 +441,6 @@ class Adafactor(Optimizer):
     def step(self, closure=None):
         """
         Performs a single optimization step
-
         Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.

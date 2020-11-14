@@ -5,6 +5,8 @@ import math
 import os
 import pickle
 import socket
+import random
+import re
 from logging import getLogger
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Tuple, Union
@@ -15,6 +17,9 @@ import torch
 import torch.distributed as dist
 from rouge_score import rouge_scorer, scoring
 from sacrebleu import corpus_bleu
+from unidecode import unidecode
+
+import torch
 from torch import nn
 from torch.utils.data import Dataset, Sampler
 
@@ -22,7 +27,11 @@ from sentence_splitter import add_newline_to_end_of_each_sentence
 from transformers import BartTokenizer, EvalPrediction, PreTrainedTokenizer, T5Tokenizer
 from transformers.file_utils import cached_property
 from transformers.modeling_bart import shift_tokens_right
+from penman import layout, Graph
+from penman.model import Model
+from penman.codec import PENMANCodec
 
+from transformers import BartTokenizer, T5Tokenizer
 
 try:
     from fairseq.data.data_utils import batch_by_size
@@ -60,7 +69,22 @@ def lmap(f: Callable, x: Iterable) -> List:
 
 def calculate_bleu(output_lns, refs_lns, **kwargs) -> dict:
     """Uses sacrebleu's corpus_bleu implementation."""
-    return {"bleu": round(corpus_bleu(output_lns, [refs_lns], **kwargs).score, 4)}
+    if not isinstance(refs_lns[0], list):
+        refs_lns = [refs_lns]
+    output_lns_normed = [
+        ' '.join(re.split('(\W)', unidecode(line.lower())))
+        for line in output_lns
+    ]
+    refs_lns_normed  = [
+        [
+            ' '.join(re.split('(\W)', unidecode(line.lower())))
+            for line in ref
+        ] for ref in refs_lns
+    ]
+    return {
+        "bleu": corpus_bleu(output_lns, refs_lns, **kwargs).score,
+        "bleu_normed": corpus_bleu(output_lns_normed, refs_lns_normed, **kwargs).score
+    }
 
 
 def build_compute_metrics_fn(task_name: str, tokenizer: PreTrainedTokenizer) -> Callable[[EvalPrediction], Dict]:
@@ -90,7 +114,6 @@ def build_compute_metrics_fn(task_name: str, tokenizer: PreTrainedTokenizer) -> 
 
     compute_metrics_fn = summarization_metrics if "summarization" in task_name else translation_metrics
     return compute_metrics_fn
-
 
 def trim_batch(
     input_ids,
@@ -234,6 +257,453 @@ class LegacySeq2SeqDataset(AbstractSeq2SeqDataset):
         }
         return batch
 
+class PenmanDataset(LegacySeq2SeqDataset):
+    """
+    Handle AMR graphs in Penman, allowing for shuffling of representation
+    """
+    def __init__(
+        self,
+        tokenizer,
+        data_dir,
+        max_source_length,
+        max_target_length,
+        type_path="train",
+        n_obs=None,
+        src_lang=None,
+        tgt_lang=None,
+        prefix="",
+        graph_shuffling=None,
+        graph_reordering=False,
+        shuffle_during_gen=True,
+        shuffle_eval=False,
+        shuffle_consistently=False,
+        append_second_graph=None,
+        graph_masking=None,
+        graph_masking_mixture=0.5,
+        graph_token_masking_prob=0.2,
+        surface_in_masked_input=False,
+        batch_by_task=False,
+        eval_seed=42,
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            data_dir=data_dir,
+            max_source_length=max_source_length,
+            max_target_length=max_target_length,
+            type_path=type_path,
+            n_obs=n_obs,
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+            prefix=prefix,
+        )
+        self.type_path = type_path
+        self.eval_seed = eval_seed
+        self.amr_codec = PENMANCodec()
+        self.sense_pattern = re.compile('-[0-9][0-9]$')
+        self.shuffle_during_gen = shuffle_during_gen
+        self.shuffle_consistently = shuffle_consistently
+        self.append_second_graph = append_second_graph
+        self.edge_types = set(
+            t for t in Path(self.src_file).read_text().split() if t.startswith(":")
+        )
+
+        # graph masking
+        self.graph_masking_mixture = graph_masking_mixture
+        self.graph_token_masking_prob = graph_token_masking_prob
+        self.surface_in_masked_input = surface_in_masked_input
+        self.batch_by_task = batch_by_task
+        self.do_graph_completion_batch = False # start false
+
+        if type_path == "train" or shuffle_eval:
+            self.graph_shuffling = graph_shuffling
+            self.graph_masking = graph_masking
+            self.graph_reordering = graph_reordering
+        elif graph_masking_mixture == 1:
+            self.graph_shuffling = None
+            self.graph_masking = graph_masking
+            self.graph_reordering = None
+        else:
+            self.graph_shuffling = None
+            self.append_second_graph = "canonical" if self.append_second_graph is not None else None
+            self.graph_masking = None
+            self.graph_reordering = None
+
+    def randomize_graph(self, graph_repr, graph_shuffling=None):
+        """
+        Randomize the graph while maintaining PENMAN notation
+        """
+        rng = None if self.type_path == "train" and not self.shuffle_consistently else self.eval_seed
+        random.seed(rng)
+        
+        if graph_shuffling == "rearrange":
+            tree = self.amr_codec.parse(graph_repr)
+            layout.rearrange(tree, key=Model().random_order) # inplace operation
+            new_repr = self.amr_codec.format(tree)
+        if graph_shuffling == "reconfigure":
+            graph = self.amr_codec.decode(graph_repr)
+            tree = layout.reconfigure(graph, key=Model().random_order)
+            new_repr = self.amr_codec.format(tree)
+        if graph_shuffling == "randomize":
+            graph = self.amr_codec.decode(graph_repr)
+            graph_random = Graph(random.sample(graph.triples, k=len(graph.triples)))
+            new_repr = self.amr_codec.encode(graph_random)
+    
+        return new_repr
+
+    def mask_graph(self, clean_graph, raw_graph=None, surface=None):
+        """
+        Mask graph components in a "text-to-text" fashion
+
+        `self.graph_masking` behavior:
+            "components"
+            in:  ( want <X> ( boy ) :arg1  <Y> go :arg0 boy ) )
+            out: <X> :arg0 <Y> ( <Z>
+
+            "nodes"
+            in:  ( <X> :arg0 ( boy ) :arg1 ( go :arg0 <Y> ) )
+            out: <X> want <Y> boy <Z> 
+
+            "all"
+            in: ( <X> ( boy ) :arg1 <Y> go :arg0 boy ) )
+            out: <X> want :arg0 <Y> ( <Z>
+
+        If `self.surface_in_input` is True, then the surface form of the sentence is
+        also included
+        """
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        if self.graph_masking == "components":
+            components = {"(", ")"} | self.edge_types
+            masked_source, target = self.mask_example(clean_graph, components)
+        if self.graph_masking == "nodes":
+            raise NotImplementedError("Node masking not yet implemented")
+        if self.graph_masking == "all":
+            masked_source, target = self.mask_example(clean_graph)
+
+        if self.surface_in_masked_input:
+            masked_source = f"{surface} <GRAPH> {masked_source}"
+
+        return masked_source, target
+
+    def mask_example(self, text, maskable_tokens=None):
+        """
+        Create a masked example from input text.
+
+        Confirmed to replicate `t5.data.preprocessorsnoise_span_to_unique_sentinel`
+        """
+        source_toks, target_toks = [], []
+        s_id, t_id = 0, 0
+        inside_masking_span = True
+
+        for tok in text.split():
+            maskable = tok in maskable_tokens if maskable_tokens is not None else True
+            if random.random() < self.graph_token_masking_prob and maskable:
+                if not inside_masking_span or len(target_toks) == 0:
+                    source_toks.append(f"<extra_id_{s_id}>")
+                    s_id += 1
+                target_toks.append(tok)
+                inside_masking_span = True
+            else:
+                if inside_masking_span:
+                    target_toks.append(f"<extra_id_{t_id}>")
+                    t_id += 1
+                source_toks.append(tok)
+                inside_masking_span = False
+
+        return " ".join(source_toks), " ".join(target_toks)
+
+    def simplify_graph(self, graph_repr):
+        """
+        Borrowed from dualgraph's preproc_amr.py, removes extraneous info from graph
+
+        github.com/UKPLab/emnlp2019-dualgraph
+        """
+        graph = self.amr_codec.decode(graph_repr)
+        instance_map = {
+            i.source: i.target for i in graph.instances() if i.target is not None
+        }
+        tokens = graph_repr.split()
+
+        new_tokens = []
+
+        for prev_tok, tok in zip([None] + tokens[:-1], tokens):
+            # ignore wiki
+            if prev_tok == ":wiki" or tok == ":wiki":
+                continue
+
+            # ignore instance-of
+            if tok.startswith('('):
+                new_tokens.append('(')
+                continue
+            elif tok == '/':
+                instance_declaration = True
+                continue
+            
+            # predicates, we remove any alignment information and parenthesis
+            elif tok.startswith(':'):
+
+                new_tok = tok.strip(')')
+                new_tokens.append(new_tok)
+
+                count_ = tok.count(')')
+                for _ in range(count_):
+                    new_tokens.append(')')
+
+            # concepts/reentrancies, treated similar as above
+            else:
+                new_tok = tok.strip(')')
+                new_tok = new_tok.split('~')[0]
+                # now we check if it is a concept or a variable (reentrancy)
+                # need to check for "instance-of" because of first person pronoun "I"
+                if new_tok in instance_map and not prev_tok == '/':
+                    # reentrancy: replace with concept
+                    new_tok = instance_map[new_tok]
+
+                # remove sense information
+                elif re.search(self.sense_pattern, new_tok):
+                    new_tok = new_tok[:-3]
+                # remove quotes
+                elif new_tok[0] == '"' and new_tok[-1] == '"':
+                    new_tok = new_tok[1:-1]
+                new_tokens.append(new_tok)
+
+                count_ = tok.count(')')
+                for _ in range(count_):
+                    new_tokens.append(')')
+
+        return ' '.join(new_tokens)
+
+    def simplify_graph_alt(self, graph_repr):
+        """
+        Alternative simplification that relies on penman library
+        """
+        # TODO
+        pass
+
+    def collate_fn(self, batch) -> Dict[str, torch.Tensor]:
+        batch = super().collate_fn(batch)
+        batch["complete_graph"] = self.do_graph_completion_batch
+        self.do_graph_completion_batch = random.random() < self.graph_masking_mixture
+        return batch
+
+    def __getitem__(self, index) -> Dict[str, torch.Tensor]:
+        index = index + 1  # linecache starts at 1
+
+        raw_graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
+
+        target_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+        assert raw_graph_repr, f"empty source line for index {index}"
+        assert target_line, f"empty target line for index {index}"
+        prefix = self.prefix
+
+        # use a graph-completion (masking or reorder) objective
+        do_graph_completion = random.random() < self.graph_masking_mixture
+        if self.batch_by_task:
+            do_graph_completion = self.do_graph_completion_batch # set in `collate_fn()`
+
+        # randomize the graph
+        first_graph_repr = raw_graph_repr
+        if self.graph_shuffling is not None and (self.shuffle_during_gen or do_graph_completion):
+            first_graph_repr = self.randomize_graph(raw_graph_repr, self.graph_shuffling) 
+        clean_graph_repr = self.simplify_graph(first_graph_repr)
+            
+        # append a second representation, if desired
+        if self.append_second_graph is not None:
+            second_graph_repr = raw_graph_repr
+            if self.append_second_graph != "canonical":
+                second_graph_repr = self.randomize_graph(
+                    raw_graph_repr, self.append_second_graph
+                )
+            clean_second_graph_repr = self.simplify_graph(second_graph_repr)
+            graph_a, graph_b = clean_graph_repr, clean_second_graph_repr
+            if self.type_path == "train" and random.random() > 0.5:
+                graph_a, graph_b = graph_b, graph_a
+            clean_graph_repr = f"{graph_a} <GRAPH> {graph_b}"
+        
+        # include a masking objective
+        if self.graph_masking and do_graph_completion:
+            prefix = "denoise Graph: " # TODO: do we need <eos> or not?
+            clean_graph_repr, target_line = self.mask_graph(
+                clean_graph_repr, raw_graph_repr, surface=target_line
+            )
+
+        # reorder a shuffled input
+        if self.graph_reordering and do_graph_completion:
+            if self.graph_masking_mixture < 1:
+                # TODO: bit hacky, don't want different prefixed for always-reorder case
+                prefix = "order Graph: "
+            tgt = self.simplify_graph(raw_graph_repr)
+            target_line = f"{target_line} <GRAPH> {tgt}" if self.graph_reordering == "generate" else tgt
+
+        source_line = prefix + clean_graph_repr
+        source_inputs = self.encode_line(self.tokenizer, source_line, self.max_source_length)
+        target_inputs = self.encode_line(self.tokenizer, target_line, self.max_target_length)
+        # TODO: drop if too long?
+        source_ids = source_inputs["input_ids"].squeeze()
+        target_ids = target_inputs["input_ids"].squeeze()
+        src_mask = source_inputs["attention_mask"].squeeze()
+        return {
+            "input_ids": source_ids,
+            "attention_mask": src_mask,
+            "decoder_input_ids": target_ids,
+        }
+
+
+class WebNLGShuffleDataset(LegacySeq2SeqDataset):
+    """
+    Shuffle linearized knowledge graphs (KG) by triple and, within each triple, by entity
+    """
+    def __init__(
+        self,
+        tokenizer,
+        data_dir,
+        max_source_length,
+        max_target_length,
+        type_path="train",
+        n_obs=None,
+        src_lang=None,
+        tgt_lang=None,
+        prefix="",
+        shuffle_components=True,
+        component_break="<entity>",
+        shuffle_spo=False,
+        spo_regex="<[SPO]>[^<]+",
+        shuffle_eval=False,
+        reconstruct_graph_prob=0.,
+        mlm_example_prob=0.,
+        eval_seed=42,
+    ):
+        super().__init__(
+            tokenizer=tokenizer,
+            data_dir=data_dir,
+            max_source_length=max_source_length,
+            max_target_length=max_target_length,
+            type_path=type_path,
+            n_obs=n_obs,
+            src_lang=src_lang,
+            tgt_lang=src_lang,
+            prefix=prefix,
+        )
+        self.type_path = type_path
+        self.eval_seed = eval_seed
+        self.reconstruct_graph_prob = reconstruct_graph_prob if type_path == "train" else 0.
+        self.mlm_example_prob = mlm_example_prob if type_path == "train" else 0.
+
+        if type_path == "train" or shuffle_eval:
+            self.shuffle_components = shuffle_components
+            self.shuffle_spo = shuffle_spo
+            self.component_break = component_break
+            self.spo_regex = spo_regex
+        else:
+            self.shuffle_components = False
+            self.shuffle_spo = False
+
+
+    def shuffle_graph_components_in_line(self, source_line):
+        """
+        Randomize the linearization of the graph
+        """
+        # TODO: this is pretty brittle, just change inputs to json or something
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        components = re.split(self.component_break, source_line)
+        components = [c for c in components if c]
+        random.shuffle(components)
+        if self.shuffle_spo:
+            components_with_shuffled_spo = []
+            for spo in components:
+                spo_split = re.findall(self.spo_regex, spo)
+                assert(len(spo_split) == 3)
+                random.seed(rng)
+                shuffled_spo = " ".join(random.sample(spo_split, 3))
+                components_with_shuffled_spo.append(shuffled_spo)
+            components = components_with_shuffled_spo
+        source_line = f" {self.component_break} ".join([''] + components)
+        return source_line
+
+    def mask_triples(self, source_line):
+        """
+        Mask out a random triple
+        """
+        # HACK: again, _very_ brittle, specific to WebNLG/T5
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        # get out the triples, picking one
+        components = re.split(self.component_break, source_line)
+        components = [c for c in components if c]
+        triple_to_mask = random.choice(components)
+
+        # split the entities in the triple
+        entities = re.split("(<[SPO]>)", triple_to_mask)[1:]
+        assert((len(entities) == 6) & (entities[0] == "<S>"))
+        idx = random.choice([1, 3, 5])
+        source_line = ' '.join(entities[:idx] + ['<extra_id_0>'] + entities[idx+1:])
+        target_line = ' '.join(['<extra_id_0>', entities[idx], '<extra_id_1>' if idx < 5 else ''])
+
+        return source_line, target_line
+
+    def mask_target(self, source_line, tgt_line):
+        """
+        Mask out the node entities in the target sentence
+        """
+        # HACK: again, _very_ brittle, specific to WebNLG/T5
+        rng = None if self.type_path == "train" else self.eval_seed
+        random.seed(rng)
+
+        # get out all triples
+        components = re.split(self.component_break, source_line)
+        i = 0
+        tgt_line_context = tgt_line
+        tgt_line = ""
+
+        for triple in components:
+            if triple:
+                for entity in re.split("<[SPO]>", triple)[1:]:
+                    entity = entity.strip()
+                    if re.search(entity, tgt_line_context, flags=re.IGNORECASE):
+                        tgt_line_context = re.sub(
+                            entity, f"<extra_id_{i}>", tgt_line_context, flags=re.IGNORECASE
+                        )
+                        tgt_line = f"{tgt_line} <extra_id_{i}> {entity}"
+                        i += 1
+        
+        tgt_line = f"{tgt_line} <extra_id_{i}>"
+        source_line = f"{source_line} <relation> {tgt_line_context} </relation>"
+        return source_line, tgt_line
+
+    def __getitem__(self, index) -> Dict[str, torch.Tensor]:
+        index = index + 1  # linecache starts at 1
+        source_line = linecache.getline(str(self.src_file), index).rstrip("\n")
+        tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+        
+        assert source_line, f"empty source line for index {index}"
+        assert tgt_line, f"empty tgt line for index {index}"
+
+        prefix = "translate Graph to Text: "
+        if self.shuffle_components:
+            source_line = self.shuffle_graph_components_in_line(source_line)
+        if random.random() < self.reconstruct_graph_prob:
+            prefix = "reconstruct Graph: "
+            source_line, tgt_line = self.mask_triples(source_line)
+        if random.random() < self.mlm_example_prob:
+            prefix = "complete Text with Graph: "
+            source_line, tgt_line = self.mask_target(source_line, tgt_line)
+
+        source_line = prefix + source_line
+        source_inputs = self.encode_line(self.tokenizer, source_line, self.max_source_length)
+        target_inputs = self.encode_line(self.tokenizer, tgt_line, self.max_target_length)
+
+        source_ids = source_inputs["input_ids"].squeeze()
+        target_ids = target_inputs["input_ids"].squeeze()
+        src_mask = source_inputs["attention_mask"].squeeze()
+        return {
+            "input_ids": source_ids,
+            "attention_mask": src_mask,
+            "decoder_input_ids": target_ids,
+        }
 
 class Seq2SeqDataset(AbstractSeq2SeqDataset):
     """A dataset that calls prepare_seq2seq_batch."""
@@ -409,6 +879,23 @@ class DistributedSortishSampler(Sampler):
 
     def set_epoch(self, epoch):
         self.epoch = epoch
+
+class EndSequentialSampler(Sampler):
+    r"""Samples elements sequentially, always in the same order.
+
+    Arguments:
+        data_source (Dataset): dataset to sample from
+    """
+
+    def __init__(self, size, end):
+        self.size = size
+        self.end = end
+
+    def __iter__(self):
+        return iter(range(self.end - self.size, self.end))
+
+    def __len__(self):
+        return self.size
 
 
 logger = getLogger(__name__)

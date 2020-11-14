@@ -22,6 +22,8 @@ from utils import (
     ROUGE_KEYS,
     LegacySeq2SeqDataset,
     Seq2SeqDataset,
+    WebNLGShuffleDataset,
+    PenmanDataset,
     assert_all_frozen,
     calculate_bleu,
     calculate_rouge,
@@ -63,11 +65,13 @@ class SummarizationModule(BaseTransformer):
                 raise ValueError("--sortish_sampler and --max_tokens_per_batch may not be used simultaneously")
 
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
-        use_task_specific_params(self.model, "summarization")
+
+        use_task_specific_params(self.model, self.mode)
         save_git_info(self.hparams.output_dir)
         self.metrics_save_path = Path(self.output_dir) / "metrics.json"
         self.hparams_save_path = Path(self.output_dir) / "hparams.pkl"
-        pickle_save(self.hparams, self.hparams_save_path)
+        if save_hparams:
+            pickle_save(self.hparams, self.hparams_save_path)
         self.step_count = 0
         self.metrics = defaultdict(list)
         self.model_type = self.config.model_type
@@ -326,6 +330,8 @@ class SummarizationModule(BaseTransformer):
             help="The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded.",
         )
+        parser.add_argument("--new_tokens_fpath", default=None, help="Path to json of additional tokens")
+
         parser.add_argument("--freeze_encoder", action="store_true")
         parser.add_argument("--freeze_embeds", action="store_true")
         parser.add_argument("--sortish_sampler", action="store_true", default=False)
@@ -354,6 +360,27 @@ class SummarizationModule(BaseTransformer):
             required=False,
             help="-1 means never early stop. early_stopping_patience is measured in validation checks, not epochs. So val_check_interval will effect it.",
         )
+        parser.add_argument("--shuffle_graph_components", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_subcomponents", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
+        parser.add_argument("--shuffle_graph_consistently", action="store_true", default=False)
+        parser.add_argument("--reconstruct_graph_prob", type=float, default=0.)
+        parser.add_argument("--mlm_example_prob", type=float, default=0.)
+
+        parser.add_argument("--resume_from_checkpont", type=str, default=None)
+
+        parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
+        parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
+        parser.add_argument("--do_not_shuffle_during_gen", action="store_true", default=False)
+
+        parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
+        parser.add_argument("--amr_reordering", choices=["reorder", "generate"], default=None)
+
+        parser.add_argument("--amr_masking_mixture", type=float, default=0.5, help="Proportion of examples to apply masking to")
+        parser.add_argument("--graph_token_masking_prob", type=float, default=0.2, help="Masking probability of graph tokens")
+        parser.add_argument("--include_surface_in_masked_input", action="store_true", default=False, help="Include surface form alongside graph when masking")
+        parser.add_argument("--batch_by_task", action="store_true", default=False, help="Perform tasks (masking, reordering) batch-by-batch")
+
         return parser
 
 
@@ -372,6 +399,114 @@ class TranslationModule(SummarizationModule):
         return calculate_bleu(preds, target)
 
 
+class DataToTextModule(SummarizationModule):
+    mode = "data-to-text"
+    loss_names = ["loss"]
+    metric_names = ["bleu"]
+    val_metric = "bleu"
+
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        if hparams.new_tokens_fpath:
+            additional_tokens = load_json(hparams.new_tokens_fpath)
+            self.tokenizer.add_tokens(additional_tokens)
+            self.model.resize_token_embeddings(len(self.tokenizer))
+        self.model.config.update({
+            'num_beams': hparams.num_beams,
+            'max_length': 150,
+            'prefix': '', #'translate Graph to Text: '
+        })
+        self.dataset_kwargs['prefix'] = self.model.config.prefix
+
+    def calc_generative_metrics(self, preds, target) -> dict:
+        return calculate_bleu_score(preds, target)
+
+
+class ShuffledDataToTextModule(DataToTextModule):
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        self.dataset_class = WebNLGShuffleDataset
+        self.dataset_kwargs.update({
+            "shuffle_eval": hparams.shuffle_graph_during_eval,
+            "shuffle_components": hparams.shuffle_graph_components,
+            "component_break": "<entity>",
+            "shuffle_spo": hparams.shuffle_graph_subcomponents,
+            "spo_regex": "<[SPO]>[^<]+",
+            "reconstruct_graph_prob": hparams.reconstruct_graph_prob,
+            "mlm_example_prob": hparams.mlm_example_prob,
+        })
+
+    def _step(self, batch: dict) -> Tuple:
+        """
+        T5-specific training step
+        """
+        source_ids, source_mask, y = batch["input_ids"], batch["attention_mask"], batch["decoder_input_ids"]
+        mask = y == self.tokenizer.pad_token_id
+        y = y.masked_fill(mask, -100)
+        outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
+        return (outputs[0], )
+
+class AMRToTextModule(DataToTextModule):
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams,  **kwargs)
+        prefix = "" # if only generating, no need for a prefix
+        if hparams.amr_masking or hparams.amr_reordering:
+            prefix = "translate Graph to Text: "
+        self.model.config.update({
+            "prefix": prefix,
+        })
+        self.dataset_class = PenmanDataset
+        self.dataset_kwargs.update({
+            "shuffle_eval": hparams.shuffle_graph_during_eval,
+            "shuffle_consistently": getattr(hparams, "shuffle_graph_consistently", False),
+            "graph_shuffling": hparams.amr_shuffling,
+            "shuffle_during_gen": not getattr(hparams, "do_not_shuffle_during_gen", False),
+            "append_second_graph": hparams.append_second_amr,
+            "prefix": prefix,
+            "graph_masking": hparams.amr_masking,
+            "graph_reordering": getattr(hparams, "amr_reordering", None),
+            "graph_masking_mixture": hparams.amr_masking_mixture,
+            "graph_token_masking_prob": hparams.graph_token_masking_prob,
+            "surface_in_masked_input": hparams.include_surface_in_masked_input,
+            "batch_by_task": getattr(hparams, "batch_by_task", False),
+        })
+        self.tokens_to_mask = torch.tensor(
+            self.tokenizer.additional_special_tokens_ids + [self.tokenizer.pad_token_id]
+        )
+        if hparams.amr_masking_mixture == 1 and hparams.amr_masking:
+            self.val_metric = "loss"
+            self.metric_names = ["loss"]
+
+    def _step(self, batch: dict) -> Tuple:
+        """
+        T5-specific training step
+        """
+        source_ids, source_mask, y = batch["input_ids"], batch["attention_mask"], batch["decoder_input_ids"]
+        mask = y == self.tokenizer.pad_token_id
+        y = y.masked_fill(mask, -100)
+        outputs = self(source_ids, attention_mask=source_mask, labels=y, use_cache=False)
+        return (outputs[0], )
+
+    def validation_step(self, batch, batch_idx) -> Dict:
+        if self.metric_names == ["loss"]:
+            # if only masking, then do not generate
+            loss_tensors = self._step(batch)
+            return {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
+        return super().validation_step(batch, batch_idx)
+
+    def validation_epoch_end(self, outputs, prefix="val") -> Dict:
+        if self.metric_names == ["loss"]:
+            self.step_count += 1
+            losses = {k: torch.stack([x[k] for x in outputs]).mean().item() for k in self.loss_names}
+            loss = losses["loss"]
+            val_metric = losses[self.val_metric]
+            metrics = {f"{prefix}_avg_{k}": x for k, x in losses.items()}
+            metrics["step_count"] = self.step_count
+            self.save_metrics(metrics, prefix)  # writes to self.metrics_save_path
+            return {"log": metrics, f"{prefix}_loss": loss, f"{prefix}_{self.val_metric}": val_metric}
+        return super().validation_epoch_end(outputs, prefix)
+        
+
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     check_output_dir(args, expected_items=3)
@@ -379,8 +514,20 @@ def main(args, model=None) -> SummarizationModule:
     if model is None:
         if "summarization" in args.task:
             model: SummarizationModule = SummarizationModule(args)
-        else:
+        elif args.task == "translation":
             model: SummarizationModule = TranslationModule(args)
+        elif args.task == "data-to-text":
+            if (
+                not args.shuffle_graph_components
+                and args.reconstruct_graph_prob == 0.
+                and args.mlm_example_prob == 0.
+            ):
+                model: SummarizationModule = DataToTextModule(args)
+            else:
+                model: SummarizationModule = ShuffledDataToTextModule(args)
+        elif args.task == "amr-to-text":
+            model: SummarizationModule = AMRToTextModule(args)
+
     dataset = Path(args.data_dir).name
     if (
         args.logger_name == "default"
@@ -416,6 +563,7 @@ def main(args, model=None) -> SummarizationModule:
         early_stopping_callback=es_callback,
         logger=logger,
     )
+
     pickle_save(model.hparams, model.output_dir / "hparams.pkl")
     if not args.do_predict:
         return model
