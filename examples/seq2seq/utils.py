@@ -212,7 +212,7 @@ class PenmanDataset(Seq2SeqDataset):
         self.graph_token_masking_prob = graph_token_masking_prob
         self.surface_in_masked_input = surface_in_masked_input
         self.batch_by_task = batch_by_task
-        self.do_graph_completion_batch = False # start false
+        self.do_graph_completion_batch = graph_masking_mixture == 1. # will be switched
 
         if type_path == "train" or shuffle_eval:
             self.graph_shuffling = graph_shuffling
@@ -432,8 +432,8 @@ class PenmanDataset(Seq2SeqDataset):
 
         # reorder a shuffled input
         if self.graph_reordering and do_graph_completion:
-            if self.graph_masking_mixture < 1:
-                # TODO: bit hacky, don't want different prefixed for always-reorder case
+            if self.graph_masking_mixture <= 1:
+                # HACK: for always-reorder case, set this to >1
                 prefix = "order Graph: "
             tgt = self.simplify_graph(raw_graph_repr)
             target_line = f"{target_line} <GRAPH> {tgt}" if self.graph_reordering == "generate" else tgt
