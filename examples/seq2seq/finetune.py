@@ -407,6 +407,7 @@ class DataToTextModule(SummarizationModule):
     default_val_metric = "bleu"
 
     def __init__(self, hparams, **kwargs):
+        hparams.eval_max_gen_length = hparams.val_max_target_length
         super().__init__(hparams, **kwargs)
         if hparams.new_tokens_fpath:
             additional_tokens = load_json(hparams.new_tokens_fpath)
@@ -414,7 +415,7 @@ class DataToTextModule(SummarizationModule):
             self.model.resize_token_embeddings(len(self.tokenizer))
         self.model.config.update({
             'num_beams': hparams.eval_beams,
-            'max_length': 150,
+            'max_length': hparams.max_target_length,
             'prefix': '', #'translate Graph to Text: '
         })
         self.dataset_kwargs['prefix'] = self.model.config.prefix
