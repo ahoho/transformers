@@ -2,6 +2,7 @@ import argparse
 import glob
 import logging
 import os
+import random
 import time
 import warnings
 from collections import defaultdict
@@ -19,6 +20,10 @@ from transformers import MBartTokenizer, get_linear_schedule_with_warmup
 
 try:
     from .utils import (
+        Seq2SeqDataset,
+        WebNLGShuffleDataset,
+        PenmanDataset,
+        MBartDataset,
         assert_all_frozen,
         use_task_specific_params,
         lmap,
@@ -32,10 +37,7 @@ try:
         get_git_info,
         ROUGE_KEYS,
         calculate_bleu_score,
-        Seq2SeqDataset,
-        WebNLGShuffleDataset,
-        PenmanDataset,
-        MBartDataset,
+        create_shuffled_data,
     )
 
     from .callbacks import Seq2SeqLoggingCallback, get_checkpoint_callback
@@ -58,6 +60,7 @@ except ImportError:
         get_git_info,
         ROUGE_KEYS,
         calculate_bleu_score,
+        create_shuffled_data,
     )
     from callbacks import Seq2SeqLoggingCallback, get_checkpoint_callback
 
@@ -465,6 +468,16 @@ def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     if len(os.listdir(args.output_dir)) > 3 and args.do_train:
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+
+    if args.n_train > -1:
+        # HACK
+        # This implies that we are using a reduced training set.
+        # If this is the case, we need to shuffle the training data since it's read
+        # truncated from the top
+        shuffled_data_dir = create_shuffled_data(
+            args.data_dir, f"{args.data_dir}-shuffled", args.seed
+        )
+        args.data_dir = str(shuffled_data_dir)
 
     if args.amr_masking and args.append_second_amr:
         raise NotImplementedError("Both masking & appending an AMR not yet supported")
