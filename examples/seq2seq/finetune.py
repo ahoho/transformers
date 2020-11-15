@@ -491,6 +491,19 @@ def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     check_output_dir(args, expected_items=3)
 
+    if args.n_train > -1:
+        # HACK
+        # This implies that we are using a reduced training set.
+        # If this is the case, we need to shuffle the training data since it's read
+        # truncated from the top
+        shuffled_data_dir = create_shuffled_data(
+            args.data_dir, f"{args.data_dir}-shuffled", args.seed
+        )
+        args.data_dir = str(shuffled_data_dir)
+
+    if args.amr_masking and args.append_second_amr:
+        raise NotImplementedError("Both masking & appending an AMR not yet supported")
+
     if model is None:
         if "summarization" in args.task:
             model: SummarizationModule = SummarizationModule(args)

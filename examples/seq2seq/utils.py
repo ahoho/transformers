@@ -62,6 +62,29 @@ def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
     return loss, nll_loss
 
 
+def create_shuffled_data(data_dir, output_dir, seed, shuffle_eval=False):
+    """
+    Create a directory of shuffled data.
+    Automatically created adjacent to the 
+    """
+    data_dir = Path(data_dir)
+    shuffled_data_dir = Path(output_dir, str(seed))
+    if not shuffled_data_dir.exists():
+        shuffled_data_dir.mkdir()
+        for split in ['train', 'val', 'test']:
+            src = (data_dir / f"{split}.source").read_text()
+            tgt = (data_dir / f"{split}.target").read_text()
+            if split == "train" or shuffle_eval:
+                random.seed(seed)
+                paired_train = list(zip(src.split("\n"), tgt.split("\n")))
+                random.shuffle(paired_train)
+                src, tgt = zip(*paired_train)
+                src, tgt = "\n".join(src), "\n".join(tgt)
+            (shuffled_data_dir / f"{split}.source").write_text(src)
+            (shuffled_data_dir / f"{split}.target").write_text(tgt)
+    return shuffled_data_dir
+
+
 def lmap(f: Callable, x: Iterable) -> List:
     """list(map(f, x))"""
     return list(map(f, x))
