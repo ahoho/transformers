@@ -52,13 +52,16 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
     return all_preds, lls.detach().numpy(), ppl
 
 
-def estimate_masked_amr_loss(model, type_path, bs, mode="bootstrap", n_samples=5):
+def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffling, mode="bootstrap", n_samples=5):
     """
-    Estimate the masked graph loss
+    Estimate the graph scaffolding losses
     """
     model.dataset_kwargs.update({
         'graph_masking_mixture': 1.,
         'shuffle_eval': True,
+        'graph_reordering': model.hparams.amr_reordering,
+        'graph_masking': masking,
+        'graph_shuffling': shuffling,
     })
     pad_token_id = model.tokenizer.pad_token_id
 
@@ -93,33 +96,6 @@ def estimate_masked_amr_loss(model, type_path, bs, mode="bootstrap", n_samples=5
     if mode == "mask_all":
         # prev_args.graph_token_masking_prob = 1.
         raise NotImplementedError("Not yet implemented")
-
-
-def estimate_reordering_amr_loss(model, type_path, bs, shuffling, seed=42):
-    """
-    Estimate the reordering loss
-    """
-    model.dataset_kwargs.update({
-        'graph_masking_mixture': 1.,
-        'shuffle_eval': True,
-        'eval_seed': seed,
-        'graph_reordering': model.hparams.amr_reordering,
-        'graph_shuffling': shuffling,
-    })
-    pad_token_id = model.tokenizer.pad_token_id
-
-    data_loader = model.get_dataloader(type_path=type_path, batch_size=bs, shuffle=False)
-    lls = []
-    for batch in tqdm(data_loader):
-        source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(
-            batch, pad_token_id
-        )
-        mask = y == pad_token_id
-        y = y.masked_fill(mask, -100)
-        loss = calculate_batch_loss(model, source_ids, source_mask, y)
-        lls.append(loss)
-    
-    return torch.stack(lls).detach().numpy().T
 
 
 def calculate_batch_loss(model, input_ids, attention_mask, labels):
@@ -244,12 +220,24 @@ def run_generate():
 
     # also calculate loss for masked graph objective
     if args.save_sentence_losses and prev_args.amr_masking is not None:
-        mask_lls = estimate_masked_amr_loss(
-            model, args.type_path, bs=args.bs, n_samples=5
+        mask_lls = estimate_scaffolding_loss(
+            model,
+            args.type_path, 
+            shuffling=original_shuffling,
+            masking=prev_args.amr_masking,
+            reordering=None,
+            bs=args.bs,
+            n_samples=5,
         )
     if args.save_sentence_losses and prev_args.amr_reordering is not None:
-        reorder_lls = estimate_reordering_amr_loss(
-            model, args.type_path, bs=args.bs, shuffling=original_shuffling,
+        reorder_lls = estimate_scaffolding_loss(
+            model,
+            args.type_path,
+            shuffling=original_shuffling,
+            masking=None,
+            reordering=prev_args.amr_reordering,
+            bs=args.bs,
+            n_samples=5,
         )
     
     if args.shuffle_graph_components: # append "shuffled" if shuffling
