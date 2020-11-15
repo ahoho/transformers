@@ -54,13 +54,16 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
     return all_preds, lls.detach().numpy(), ppl
 
 
-def estimate_masked_amr_loss(model, type_path, bs, mode="bootstrap", n_samples=5):
+def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffling, mode="bootstrap", n_samples=5):
     """
-    Estimate the masked graph loss
+    Estimate the graph scaffolding losses
     """
     model.dataset_kwargs.update({
         'graph_masking_mixture': 1.,
         'shuffle_eval': True,
+        'graph_reordering': model.hparams.amr_reordering,
+        'graph_masking': masking,
+        'graph_shuffling': shuffling,
     })
     pad_token_id = model.tokenizer.pad_token_id
     sentinel_ids = model.tokenizer.additional_special_tokens_ids
@@ -171,6 +174,7 @@ def run_generate(verbose=True):
     if trained_with_second_amr and args.append_second_amr is None:
         print("Trained with a second AMR, but not set during evaluation")
 
+    original_shuffling = prev_args.amr_shuffling
     prev_args.amr_shuffling = args.amr_shuffling
 
     prev_args.shuffle_graph_during_eval = (
@@ -224,8 +228,24 @@ def run_generate(verbose=True):
 
     # also calculate loss for masked graph objective
     if args.save_sentence_losses and prev_args.amr_masking is not None:
-        mask_lls = estimate_masked_amr_loss(
-            model, args.type_path, bs=args.bs, n_samples=5
+        mask_lls = estimate_scaffolding_loss(
+            model,
+            args.type_path, 
+            shuffling=original_shuffling,
+            masking=prev_args.amr_masking,
+            reordering=None,
+            bs=args.bs,
+            n_samples=5,
+        )
+    if args.save_sentence_losses and prev_args.amr_reordering is not None:
+        reorder_lls = estimate_scaffolding_loss(
+            model,
+            args.type_path,
+            shuffling=original_shuffling,
+            masking=None,
+            reordering=prev_args.amr_reordering,
+            bs=args.bs,
+            n_samples=5,
         )
     
     if args.shuffle_graph_components: # append "shuffled" if shuffling
@@ -243,6 +263,8 @@ def run_generate(verbose=True):
         np.save(Path(args.output_dir, f"{args.type_path}-gen_lls.npy"), gen_lls)
         if prev_args.amr_masking is not None:
             np.save(Path(args.output_dir, f"{args.type_path}-mask_lls.npy"), mask_lls)
+        if prev_args.amr_reordering is not None:
+            np.save(Path(args.output_dir, f"{args.type_path}-reorder_lls.npy"), reorder_lls)
 
     if not args.generate:
         return None

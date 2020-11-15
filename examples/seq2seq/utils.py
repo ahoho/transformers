@@ -524,6 +524,11 @@ class PenmanDataset(LegacySeq2SeqDataset):
         if self.batch_by_task:
             do_graph_completion = self.do_graph_completion_batch # set in `collate_fn()`
 
+        # if both masking and reordering on, do either one or the other at random
+        do_mask = self.graph_masking is not None
+        if self.graph_masking and self.graph_reordering:
+            do_mask = random.random() < 0.5
+
         # randomize the graph
         first_graph_repr = raw_graph_repr
         if self.graph_shuffling is not None and (self.shuffle_during_gen or do_graph_completion):
@@ -544,16 +549,17 @@ class PenmanDataset(LegacySeq2SeqDataset):
             clean_graph_repr = f"{graph_a} <GRAPH> {graph_b}"
         
         # include a masking objective
-        if self.graph_masking and do_graph_completion:
+        if self.graph_masking and do_graph_completion and do_mask:
             prefix = "denoise Graph: " # TODO: do we need <eos> or not?
             clean_graph_repr, target_line = self.mask_graph(
                 clean_graph_repr, raw_graph_repr, surface=target_line
             )
+            # add_eos = False
 
         # reorder a shuffled input
-        if self.graph_reordering and do_graph_completion:
-            if self.graph_masking_mixture < 1:
-                # TODO: bit hacky, don't want different prefixed for always-reorder case
+        if self.graph_reordering and do_graph_completion and not do_mask:
+            if self.graph_masking_mixture <= 1:
+                # HACK: for always-reorder case, set this to >1
                 prefix = "order Graph: "
             tgt = self.simplify_graph(raw_graph_repr)
             target_line = f"{target_line} <GRAPH> {tgt}" if self.graph_reordering == "generate" else tgt
