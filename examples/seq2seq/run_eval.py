@@ -16,9 +16,9 @@ from transformers import AutoTokenizer, BertTokenizer, T5Tokenizer
 from finetune import SummarizationModule, TranslationModule, DataToTextModule, ShuffledDataToTextModule, AMRToTextModule
 
 try:
-    from .utils import pickle_load, pickle_save, save_json, Seq2SeqDataset, calculate_bleu_score
+    from .utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu
 except ImportError:
-    from utils import pickle_load, pickle_save, save_json, Seq2SeqDataset, calculate_bleu_score
+    from utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -30,7 +30,11 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
     pad_token_id = model.tokenizer.pad_token_id
 
     for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
-        source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(batch, pad_token_id)
+        
+        y = trim_batch(batch["decoder_input_ids"], pad_token_id)
+        source_ids, source_mask = trim_batch(
+            batch["input_ids"], pad_token_id, attention_mask=batch["attention_mask"]
+        )
 
         if generate:
             generated_ids = model.model.generate(
@@ -38,7 +42,10 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
                 attention_mask=source_mask,
                 use_cache=True,
                 decoder_start_token_id=model.decoder_start_token_id,
-                **gen_kwargs,
+                num_beams=5,
+                min_length=0,
+                max_length=model.eval_max_length,
+                length_penalty=1.0,
             )
             preds = model.ids_to_clean_text(generated_ids)
             preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
@@ -84,8 +91,9 @@ def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffli
 
             # calculate loss
             for batch in data_loader:
-                source_ids, source_mask, y = Seq2SeqDataset.trim_seq2seq_batch(
-                    batch, pad_token_id
+                y = trim_batch(batch["decoder_input_ids"], pad_token_id)
+                source_ids, source_mask = trim_batch(
+                    batch["input_ids"], pad_token_id, attention_mask=batch["attention_mask"]
                 )
                 #mask = (y[..., None] == labels_to_ignore).any(-1)
                 mask = y == pad_token_id
@@ -108,7 +116,7 @@ def calculate_batch_loss(model, input_ids, attention_mask, labels):
     mask = labels != -100
     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
     with torch.no_grad():
-        out = model.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        out = model.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, return_dict=True)
         loss = loss_fct(out.logits.view(-1, out.logits.size(-1)), labels.view(-1))
         loss = loss.view(out.logits.size(0), -1)
         loss = loss.sum(-1) / mask.sum(-1)
@@ -276,7 +284,7 @@ def run_generate(verbose=True):
         return
 
     # Compute scores
-    score_fn = calculate_bleu_score # TODO: support others
+    score_fn = calculate_bleu # TODO: support others
 
     val_tokenizer = None
     if args.tokenizer_path_or_name is not None:
