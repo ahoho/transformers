@@ -91,7 +91,7 @@ class BaseTransformer(pl.LightningModule):
         # can also expand arguments into trainer signature for easier reading
 
         self.save_hyperparameters(hparams)
-        self.step_count = 0
+        self.step_count = -2
         self.output_dir = Path(self.hparams.output_dir)
         cache_dir = self.hparams.cache_dir if self.hparams.cache_dir else None
         if config is None:
