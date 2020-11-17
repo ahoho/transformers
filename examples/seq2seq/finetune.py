@@ -71,10 +71,10 @@ class SummarizationModule(BaseTransformer):
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
 
         use_task_specific_params(self.model, self.mode)
-        save_git_info(self.output_dir)
         self.metrics_save_path = Path(self.output_dir) / "metrics.json"
         self.hparams_save_path = Path(self.output_dir) / "hparams.pkl"
         if save_hparams:
+            save_git_info(self.output_dir)
             pickle_save(self.hparams, self.hparams_save_path)
         self.step_count = 0
         self.metrics = defaultdict(list)
