@@ -23,13 +23,13 @@ except ImportError:
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
+def generate_from_model(data_loader, model, generate=True, no_pb=True):
     all_preds = []
     lls = []
     
     pad_token_id = model.tokenizer.pad_token_id
 
-    for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
+    for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), disable=no_pb):
         
         y = trim_batch(batch["decoder_input_ids"], pad_token_id)
         source_ids, source_mask = trim_batch(
@@ -50,7 +50,8 @@ def generate_from_model(data_loader, model, generate=True, **gen_kwargs):
             preds = model.ids_to_clean_text(generated_ids)
             preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
             all_preds.extend(preds)
-
+        if no_pb: # for beaker logs
+            print(f"{i/len(data_loader)*100:0.2f}%")
         y = y.masked_fill(y == pad_token_id, -100)
         loss = calculate_batch_loss(model, source_ids, source_mask, y)
         lls.append(loss)
