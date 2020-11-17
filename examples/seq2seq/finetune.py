@@ -10,6 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+sys.path.append("../")
+
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -39,6 +41,7 @@ from utils import (
     save_json,
     load_json,
     use_task_specific_params,
+    create_shuffled_data,
 )
 
 
@@ -374,7 +377,7 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
         parser.add_argument("--do_not_shuffle_during_gen", action="store_true", default=False)
 
-        parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
+        parser.add_argument("--amr_masking", default=None)
         parser.add_argument("--amr_reordering", choices=["reorder", "generate"], default=None)
 
         parser.add_argument("--amr_masking_mixture", type=float, default=0.5, help="Proportion of examples to apply masking to")
