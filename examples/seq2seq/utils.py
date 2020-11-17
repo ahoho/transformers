@@ -376,7 +376,11 @@ class PenmanDataset(LegacySeq2SeqDataset):
         """
         Mask graph components in a "text-to-text" fashion
 
-        `self.graph_masking` behavior:
+        `self.graph_masking` behavior. 
+
+            original input: ( want :arg0 ( boy ) :arg1 ( go :arg0 boy ) )
+
+            # Tokens to mask (uses default T5 masking)
             "components"
             in:  ( want <X> ( boy ) :arg1  <Y> go :arg0 boy ) )
             out: <X> :arg0 <Y> ( <Z>
@@ -389,20 +393,59 @@ class PenmanDataset(LegacySeq2SeqDataset):
             in: ( <X> ( boy ) :arg1 <Y> go :arg0 boy ) )
             out: <X> want :arg0 <Y> ( <Z>
 
+            # Other masking styles
+            "mass":
+            in: ( <X> ( boy ) :arg1 <X> go :arg0 boy ) )
+            out: original text
+
+            "drop":
+            in: ( ( boy ) :arg1 go :arg0 boy ) )
+            out: original text
+
+            "corrupt":
+            in: ( ) boy ) :arg0 go :arg1 boy ))
+            out: original text
+
+            "unshuffle":
+            if input is "reconfigure" or "randomize", the output is unshuffled.
+            Must be used in combination with "mass", "drop", or "corrupt"
+
+
         If `self.surface_in_input` is True, then the surface form of the sentence is
         also included
         """
         rng = None if self.type_path == "train" else self.eval_seed
         random.seed(rng)
 
-        if self.graph_masking == "components":
+        if "components" in self.graph_masking:
             components = {"(", ")"} | self.edge_types
             masked_source, target = self.mask_example(clean_graph, components)
-        if self.graph_masking == "nodes":
+        if "nodes" in self.graph_masking:
             raise NotImplementedError("Node masking not yet implemented")
-        if self.graph_masking == "all":
+        if "all" in self.graph_masking:
             masked_source, target = self.mask_example(clean_graph)
+    
+        if "mass" in self.graph_masking: # e.g., "components-mass"
+            masked_source = re.sub("<extra_id_[0-9]+>", "<extra_id_0>", masked_source)
 
+        if "drop" in self.graph_masking:
+            masked_source = re.sub("<extra_id_[0-9]+>", "", masked_source)
+
+        if "corrupt" in self.graph_masking:
+            parens = {"(", ")", ""}
+            edges = {":ARG0", ":ARG1", ":ARG2", ":op1", ":mod", ":ARG0-of", ":ARG1-of"}
+            source_toks = clean_graph.split()
+            for idx, tok in enumerate(source_toks):
+                if random.random() < self.graph_token_masking_prob:
+                    if tok in parens:
+                        source[idx] = random.choice(list(parens - {tok}))
+                    if tok.startswith(":"):
+                        source[idx] = random.choice(list(edges - {tok}))
+            masked_source = " ".join(source)
+        
+        if "unshuffle": # e.g., "components-corrupt-unshuffle"
+            target = self.simplify_graph(raw_graph)
+                
         if self.surface_in_masked_input:
             masked_source = f"{surface} <GRAPH> {masked_source}"
 
@@ -550,11 +593,10 @@ class PenmanDataset(LegacySeq2SeqDataset):
         
         # include a masking objective
         if self.graph_masking and do_graph_completion and do_mask:
-            prefix = "denoise Graph: " # TODO: do we need <eos> or not?
+            prefix = "denoise Graph: "
             clean_graph_repr, target_line = self.mask_graph(
                 clean_graph_repr, raw_graph_repr, surface=target_line
             )
-            # add_eos = False
 
         # reorder a shuffled input
         if self.graph_reordering and do_graph_completion and not do_mask:
