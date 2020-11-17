@@ -355,8 +355,10 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument(
             "--val_metric", type=str, default=None, required=False, choices=["bleu", "rouge2", "loss", None]
         )
+        parser.add_argument("--no_progress_bar", dest="use_progress_bar", action="store_false", default=True)
         parser.add_argument("--eval_max_gen_length", type=int, default=None, help="never generate more than n tokens")
         parser.add_argument("--save_top_k", type=int, default=1, required=False, help="How many checkpoints to save")
+        parser.add_argument("--resume_from_checkpont", type=str, default=None)
         parser.add_argument(
             "--early_stopping_patience",
             type=int,
@@ -364,14 +366,13 @@ class SummarizationModule(BaseTransformer):
             required=False,
             help="-1 means never early stop. early_stopping_patience is measured in validation checks, not epochs. So val_check_interval will effect it.",
         )
+
         parser.add_argument("--shuffle_graph_components", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_subcomponents", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_during_eval", action="store_true", default=False)
         parser.add_argument("--shuffle_graph_consistently", action="store_true", default=False)
         parser.add_argument("--reconstruct_graph_prob", type=float, default=0.)
         parser.add_argument("--mlm_example_prob", type=float, default=0.)
-
-        parser.add_argument("--resume_from_checkpont", type=str, default=None)
 
         parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
         parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
@@ -558,6 +559,7 @@ def main(args, model=None) -> SummarizationModule:
         ),
         early_stopping_callback=es_callback,
         logger=logger,
+        use_progress_bar=args.use_progress_bar,
     )
 
     pickle_save(model.hparams, model.output_dir / "hparams.pkl")

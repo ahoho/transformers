@@ -362,6 +362,7 @@ def generic_train(
     extra_callbacks=[],
     checkpoint_callback=None,
     logging_callback=None,
+    use_progress_bar=True,
     **extra_train_kwargs
 ):
     pl.seed_everything(args.seed)
@@ -394,10 +395,12 @@ def generic_train(
 
     trainer = pl.Trainer.from_argparse_args(
         args,
+        default_root_dir=args.output_dir,
         weights_summary=None,
         callbacks=[logging_callback] + extra_callbacks,
         logger=logger,
         checkpoint_callback=checkpoint_callback,
+        progress_bar_refresh_rate=int(use_progress_bar),
         **train_params,
     )
 

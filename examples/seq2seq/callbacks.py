@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.utilities import rank_zero_only
+from pytorch_lightning.utilities import rank_zero_only, rank_zero_info
 
 from utils import save_json
 
@@ -80,6 +80,15 @@ class Seq2SeqLoggingCallback(pl.Callback):
     @rank_zero_only
     def on_validation_end(self, trainer: pl.Trainer, pl_module):
         save_json(pl_module.metrics, pl_module.metrics_save_path)
+        # Log results
+        if trainer.progress_bar_callback is None:
+            metrics = trainer.callback_metrics
+            metrics_str = [
+                f"{k}: {v:0.4f}" for k, v in metrics.items()
+                if "loss" in k or "bleu" in k and isinstance(v, float)
+            ]
+            rank_zero_info(f"Step {trainer.global_step:05d}: " + ", ".join(metrics_str))
+
         # Uncommenting this will save val generations
         # return self._write_logs(trainer, pl_module, "valid")
 
