@@ -51,7 +51,7 @@ def generate_from_model(data_loader, model, generate=True, no_pb=True):
             preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
             all_preds.extend(preds)
         if no_pb: # for beaker logs
-            print(f"{i/len(data_loader)*100:0.2f}%")
+            print(f"{i+1/len(data_loader)*100:0.2f}%")
         y = y.masked_fill(y == pad_token_id, -100)
         loss = calculate_batch_loss(model, source_ids, source_mask, y)
         lls.append(loss)
@@ -232,7 +232,8 @@ def run_generate(verbose=True):
     model.eval()
 
     # Generate & compute loss
-    print("Generating...")
+    print("Generating with {args.device}...")
+    model = model.to(args.device)
     preds, gen_lls, ppl = generate_from_model(data_loader, model, generate=args.generate)
 
     # also calculate loss for masked graph objective
