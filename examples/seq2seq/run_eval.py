@@ -4,6 +4,7 @@ import argparse
 import sys
 from unidecode import unidecode
 from pathlib import Path
+from collections import defaultdict
 import re
 
 sys.path.append("..")
@@ -16,11 +17,42 @@ from transformers import AutoTokenizer, BertTokenizer, T5Tokenizer
 from finetune import SummarizationModule, TranslationModule, DataToTextModule, ShuffledDataToTextModule, AMRToTextModule
 
 try:
-    from .utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu
+    from .utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu, load_json
 except ImportError:
-    from utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu
+    from utils import pickle_load, pickle_save, save_json, trim_batch, calculate_bleu, load_json
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def parse_training_metrics(data):
+    """
+    Parse the metrics created during training
+    """
+    metrics = defaultdict(list)
+    for step in data:
+        metrics['train_val_losses'].append(step['val_avg_loss'])
+        metrics['train_val_bleus'].append(step['val_avg_loss'])
+
+    metrics['best_train_val_loss'] = float(np.min(metrics['train_val_losses']))
+    metrics['best_train_val_loss_step'] = int(np.argmin(metrics['train_val_losses']))
+    metrics['best_train_val_bleu'] = float(np.max(metrics['train_val_losses']))
+    metrics['best_train_val_bleu_step'] = int(np.argmax(metrics['train_val_losses']))
+    metrics['total_steps'] = len(data) - 1
+    
+    return dict(metrics)
+
+
+def process_batch(batch, pad_token_id=0, device=None):
+    """
+    Clean batch before passing to model
+    """
+    if device is None:
+        device = DEFAULT_DEVICE
+    y = trim_batch(batch["decoder_input_ids"], pad_token_id)
+    source_ids, source_mask = trim_batch(
+        batch["input_ids"], pad_token_id, attention_mask=batch["attention_mask"]
+    )
+    return y.to(device), source_ids.to(device), source_mask.to(device)
 
 
 def generate_from_model(data_loader, model, generate=True, no_pb=True):
@@ -31,10 +63,7 @@ def generate_from_model(data_loader, model, generate=True, no_pb=True):
 
     for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), disable=no_pb):
         
-        y = trim_batch(batch["decoder_input_ids"], pad_token_id)
-        source_ids, source_mask = trim_batch(
-            batch["input_ids"], pad_token_id, attention_mask=batch["attention_mask"]
-        )
+        y, source_ids, source_mask = process_batch(batch, pad_token_id)
 
         if generate:
             generated_ids = model.model.generate(
@@ -59,7 +88,7 @@ def generate_from_model(data_loader, model, generate=True, no_pb=True):
     lls = torch.cat(lls)
     ppl = torch.exp(lls.sum() / i).item()
 
-    return all_preds, lls.detach().numpy(), ppl
+    return all_preds, lls.cpu().detach().numpy(), ppl
 
 
 def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffling, mode="bootstrap", n_samples=5):
@@ -74,8 +103,6 @@ def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffli
         'graph_shuffling': shuffling,
     })
     pad_token_id = model.tokenizer.pad_token_id
-    sentinel_ids = model.tokenizer.additional_special_tokens_ids
-    labels_to_ignore = torch.tensor([pad_token_id] + sentinel_ids)
 
     # OPTION A: bootstrapped estimate of sentence loss
     if mode == "bootstrap":
@@ -92,18 +119,14 @@ def estimate_scaffolding_loss(model, type_path, bs, reordering, masking, shuffli
 
             # calculate loss
             for batch in data_loader:
-                y = trim_batch(batch["decoder_input_ids"], pad_token_id)
-                source_ids, source_mask = trim_batch(
-                    batch["input_ids"], pad_token_id, attention_mask=batch["attention_mask"]
-                )
-                #mask = (y[..., None] == labels_to_ignore).any(-1)
+                y, source_ids, source_mask = process_batch(batch, pad_token_id)
                 mask = y == pad_token_id
                 y = y.masked_fill(mask, -100)
                 loss = calculate_batch_loss(model, source_ids, source_mask, y)
                 lls.append(loss)
                 pbar.update()
             sampled_lls.append(torch.cat(lls))
-        return torch.stack(sampled_lls).detach().numpy().T
+        return torch.stack(sampled_lls).cpu().detach().numpy().T
     
     # OPTION B: mask all
     if mode == "mask_all":
@@ -124,22 +147,6 @@ def calculate_batch_loss(model, input_ids, attention_mask, labels):
 
     return loss
 
-def val_tokenize(lines, tokenizer=None):
-    """
-    To ensure consistency with other models, we want to tokenize/normedenize in the same
-    way across all models.
-
-    TODO: Fix this across all modules, since it's messy
-    """
-    if tokenizer is None:
-        return lines
-    
-    lines = [" ".join(tokenizer.tokenize(l)) for l in lines]
-    if isinstance(tokenizer, T5Tokenizer):
-        lines = [l.replace(" ", "").replace("▁", " ") for l in lines]
-    if isinstance(tokenizer, BertTokenizer):
-        lines = [l.replace(" ##", "") for l in lines]
-    return lines
 
 def run_generate(verbose=True):
     """
@@ -169,9 +176,14 @@ def run_generate(verbose=True):
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
     )
-
+    parser.add_argument("--output_trainining_metrics_only", default=False, action="store_true", help="Don't generate, and only up the logs from training")
     args = parser.parse_args()
-    
+
+    training_metrics = load_json(Path(args.model_dir, "metrics.json"))["val"]
+    training_metrics = parse_training_metrics(training_metrics)
+    if args.output_trainining_metrics_only:
+        save_json(training_metrics, path=Path(args.output_dir, "metrics.json"))
+
     # Reset previously used arguments as necessary
     prev_args = pickle_load(Path(args.model_dir, "hparams.pkl"))
     prev_args.model_name_or_path = str(Path(args.model_dir, "best_tfmr"))
@@ -232,7 +244,7 @@ def run_generate(verbose=True):
     model.eval()
 
     # Generate & compute loss
-    print("Generating with {args.device}...")
+    print(f"Generating with {args.device}...")
     model = model.to(args.device)
     preds, gen_lls, ppl = generate_from_model(data_loader, model, generate=args.generate)
 
@@ -285,44 +297,32 @@ def run_generate(verbose=True):
     if not args.reference_paths:
         return
 
-    # Compute scores
-    score_fn = calculate_bleu # TODO: support others
-
-    val_tokenizer = None
-    if args.tokenizer_path_or_name is not None:
-        val_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path_or_name)
-
-    preds = val_tokenize(preds, val_tokenizer)
-
+    # Read in references
     reference_lns = []
     for path in args.reference_paths:
         if not Path(path).exists():
             # silently try in the input directory
             path = Path(prev_args.data_dir, path)
-        
+
         with open(path, "r") as infile:
             lines = [x.strip() for i, x in enumerate(infile) if i < len(preds)]
-        lines = val_tokenize(lines, val_tokenizer)
         reference_lns.append(lines)
 
-    # main BLEU
+    # Compute scores
+    score_fn = calculate_bleu # TODO: support others
     scores = score_fn(preds, reference_lns)
-    if args.tokenizer_path_or_name is None:
-        preds_normed = [
-            ' '.join(re.split('(\W)', unidecode(line.lower())))
-            for line in preds
-        ]
-        reference_lns_normed  = [
-            [
-                ' '.join(re.split('(\W)', unidecode(line.lower())))
-                for line in ref
-            ] for ref in reference_lns
-        ]
-        scores_normed = score_fn(preds_normed, reference_lns_normed)
-        scores['bleu_normed'] = scores_normed['bleu']
-
     scores['ppl'] = ppl
     save_json(scores, Path(args.output_dir, f"{args.type_path}-bleu.json"))
+
+    # Create beaker metrics
+    full_metrics = {
+        "bleu":  scores['bleu'],
+        "bleu_normed": scores['bleu_normed'],
+        "ppl": ppl,
+        "preds": preds,
+    }
+    full_metrics.update(**training_metrics)
+    save_json(full_metrics, Path(args.output_dir, "metrics.json"))
 
 
 if __name__ == "__main__":
