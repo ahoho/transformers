@@ -35,8 +35,8 @@ def parse_training_metrics(data):
 
     metrics['best_train_val_loss'] = float(np.min(metrics['train_val_losses']))
     metrics['best_train_val_loss_step'] = int(np.argmin(metrics['train_val_losses']))
-    metrics['best_train_val_bleu'] = float(np.max(metrics['train_val_losses']))
-    metrics['best_train_val_bleu_step'] = int(np.argmax(metrics['train_val_losses']))
+    metrics['best_train_val_bleu'] = float(np.max(metrics['train_val_bleus']))
+    metrics['best_train_val_bleu_step'] = int(np.argmax(metrics['train_val_bleus']))
     metrics['total_steps'] = len(data) - 1
     
     return dict(metrics)
@@ -55,13 +55,13 @@ def process_batch(batch, pad_token_id=0, device=None):
     return y.to(device), source_ids.to(device), source_mask.to(device)
 
 
-def generate_from_model(data_loader, model, generate=True, no_pb=True):
+def generate_from_model(data_loader, model, generate=True):
     all_preds = []
     lls = []
     
     pad_token_id = model.tokenizer.pad_token_id
 
-    for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), disable=no_pb):
+    for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
         
         y, source_ids, source_mask = process_batch(batch, pad_token_id)
 
@@ -79,8 +79,7 @@ def generate_from_model(data_loader, model, generate=True, no_pb=True):
             preds = model.ids_to_clean_text(generated_ids)
             preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
             all_preds.extend(preds)
-        if no_pb: # for beaker logs
-            print(f"{(i+1)/len(data_loader)*100:0.2f}%")
+        
         y = y.masked_fill(y == pad_token_id, -100)
         loss = calculate_batch_loss(model, source_ids, source_mask, y)
         lls.append(loss)
@@ -316,10 +315,10 @@ def run_generate(verbose=True):
 
     # Create beaker metrics
     full_metrics = {
-        "bleu":  scores['bleu'],
-        "bleu_normed": scores['bleu_normed'],
-        "ppl": ppl,
-        "preds": preds,
+        f"{args.type_path}-bleu":  scores['bleu'],
+        f"{args.type_path}-bleu_normed": scores['bleu_normed'],
+        f"{args.type_path}-ppl": ppl,
+        f"{args.type_path}-preds": preds,
     }
     full_metrics.update(**training_metrics)
     save_json(full_metrics, Path(args.output_dir, "metrics.json"))
