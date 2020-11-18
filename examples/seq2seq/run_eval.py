@@ -270,8 +270,8 @@ def run_generate(verbose=True):
         args.type_path = f"{args.type_path}-{args.amr_shuffling}" 
     if args.append_second_amr:
         args.type_path = f"{args.type_path}-second_{args.append_second_amr}"
-    if args.data_dir is not None: # implies a different evaluation dataset
-        args.type_path = f"{Path(args.data_dir).name}-{args.type_path}"
+    #if args.data_dir is not None: # implies a different evaluation dataset
+    #    args.type_path = f"{Path(args.data_dir).name}-{args.type_path}"
 
     pickle_save(args, Path(args.output_dir, f"{args.type_path}-hparams.pkl"))
 
