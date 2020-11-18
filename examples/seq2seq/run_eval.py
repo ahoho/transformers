@@ -80,7 +80,7 @@ def generate_from_model(data_loader, model, generate=True, no_pb=True):
             preds = [p[:p.index("<GRAPH>")] if "<GRAPH>" in p else p for p in preds]
             all_preds.extend(preds)
         if no_pb: # for beaker logs
-            print(f"{i+1/len(data_loader)*100:0.2f}%")
+            print(f"{(i+1)/len(data_loader)*100:0.2f}%")
         y = y.masked_fill(y == pad_token_id, -100)
         loss = calculate_batch_loss(model, source_ids, source_mask, y)
         lls.append(loss)
