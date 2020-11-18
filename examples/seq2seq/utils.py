@@ -427,10 +427,8 @@ class PenmanDataset(LegacySeq2SeqDataset):
     
         if "mass" in self.graph_masking: # e.g., "components-mass"
             masked_source = re.sub("<extra_id_[0-9]+>", "<extra_id_0>", masked_source)
-
         if "drop" in self.graph_masking:
             masked_source = re.sub("<extra_id_[0-9]+>", "", masked_source)
-
         if "corrupt" in self.graph_masking:
             parens = {"(", ")", ""}
             edges = {":ARG0", ":ARG1", ":ARG2", ":op1", ":mod", ":ARG0-of", ":ARG1-of"}
@@ -438,10 +436,10 @@ class PenmanDataset(LegacySeq2SeqDataset):
             for idx, tok in enumerate(source_toks):
                 if random.random() < self.graph_token_masking_prob:
                     if tok in parens:
-                        source[idx] = random.choice(list(parens - {tok}))
+                        source_toks[idx] = random.choice(list(parens - {tok}))
                     if tok.startswith(":"):
-                        source[idx] = random.choice(list(edges - {tok}))
-            masked_source = " ".join(source)
+                        source_toks[idx] = random.choice(list(edges - {tok}))
+            masked_source = " ".join(source_toks)
         
         if "unshuffle": # e.g., "components-corrupt-unshuffle"
             target = self.simplify_graph(raw_graph)

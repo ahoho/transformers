@@ -175,13 +175,8 @@ def run_generate(verbose=True):
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
     )
-    parser.add_argument("--output_trainining_metrics_only", default=False, action="store_true", help="Don't generate, and only up the logs from training")
+    parser.add_argument("--output_trainining_metrics", default=False, action="store_true", help="Don't generate, and only up the logs from training")
     args = parser.parse_args()
-
-    training_metrics = load_json(Path(args.model_dir, "metrics.json"))["val"]
-    training_metrics = parse_training_metrics(training_metrics)
-    if args.output_trainining_metrics_only:
-        save_json(training_metrics, path=Path(args.output_dir, "metrics.json"))
 
     # Reset previously used arguments as necessary
     prev_args = pickle_load(Path(args.model_dir, "hparams.pkl"))
@@ -320,7 +315,17 @@ def run_generate(verbose=True):
         f"{args.type_path}-ppl": ppl,
         f"{args.type_path}-preds": preds,
     }
-    full_metrics.update(**training_metrics)
+
+    if args.output_trainining_metrics:
+        training_metrics = load_json(Path(args.model_dir, "metrics.json"))["val"]
+        training_metrics = parse_training_metrics(training_metrics)
+        full_metrics.update(**training_metrics)
+    
+    if Path(args.output_dir, "metrics.json").exists():
+        # if val was run and now we are doing test, for example
+        prev_metrics = load_json(Path(args.output_dir, "metrics.json"))
+        prev_metrics.update(**full_metrics)
+        full_metrics = prev_metrics
     save_json(full_metrics, Path(args.output_dir, "metrics.json"))
 
 
