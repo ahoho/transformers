@@ -414,8 +414,10 @@ class DataToTextModule(SummarizationModule):
         hparams.eval_max_gen_length = hparams.val_max_target_length
         super().__init__(hparams, **kwargs)
         if hparams.new_tokens_fpath:
-            additional_tokens = load_json(hparams.new_tokens_fpath)
-            self.tokenizer.add_tokens(additional_tokens)
+            additional_tokens = sorted(load_json(hparams.new_tokens_fpath), key=lambda x: -len(x))
+            self.tokenizer.add_special_tokens({
+                "additional_special_tokens": self.tokenizer.additional_special_tokens + additional_tokens
+            })
             self.model.resize_token_embeddings(len(self.tokenizer))
         self.model.config.update({
             'num_beams': hparams.eval_beams,
