@@ -572,7 +572,7 @@ class PenmanDataset(LegacySeq2SeqDataset):
 
         return batch
 
-    def __getitem__(self, index) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, index, return_text=False) -> Dict[str, torch.Tensor]:
         index = index + 1  # linecache starts at 1
 
         raw_graph_repr = linecache.getline(str(self.src_file), index).rstrip("\n")
@@ -627,6 +627,8 @@ class PenmanDataset(LegacySeq2SeqDataset):
             )
 
         source_line = prefix + clean_graph_repr
+        if return_text: # quick hack to debug
+            return source_line, target_line
         source_inputs = self.encode_line(self.tokenizer, source_line, self.max_source_length)
         target_inputs = self.encode_line(self.tokenizer, target_line, self.max_target_length)
         # TODO: drop if too long?
