@@ -65,7 +65,7 @@ def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
 def create_shuffled_data(data_dir, output_dir, seed, shuffle_eval=False):
     """
     Create a directory of shuffled data.
-    Automatically created adjacent to the 
+    Automatically created adjacent to the original source
     """
     data_dir = Path(data_dir)
     shuffled_data_dir = Path(output_dir, str(seed))
@@ -410,6 +410,9 @@ class PenmanDataset(LegacySeq2SeqDataset):
             if input is "reconfigure" or "randomize", the output is unshuffled.
             Must be used in combination with "mass", "drop", or "corrupt"
 
+            "surface":
+            more-or-less standard MLM on the surface sentence,
+            combining with other variants does nothing
 
         If `self.surface_in_input` is True, then the surface form of the sentence is
         also included
@@ -421,15 +424,18 @@ class PenmanDataset(LegacySeq2SeqDataset):
             components = {"(", ")"} | self.edge_types
             masked_source, target = self.mask_example(clean_graph, components)
         if "nodes" in self.graph_masking:
-            raise NotImplementedError("Node masking not yet implemented")
+            nodes = set(clean_graph.split()) - ({"(", ")"} | self.edge_types)
+            masked_source, target = self.mask_example(clean_graph, nodes)
         if "all" in self.graph_masking:
             masked_source, target = self.mask_example(clean_graph)
     
         if "mass" in self.graph_masking: # e.g., "components-mass"
             masked_source = re.sub("<extra_id_[0-9]+>", "<extra_id_0>", masked_source)
+            target = clean_graph
         if "drop" in self.graph_masking:
             masked_source = re.sub("<extra_id_[0-9]+>", "", masked_source)
-        if "corrupt" in self.graph_masking:
+            target = re.sub("<extra_id_[0-9]+>", "", target)
+        if "corrupt" in self.graph_masking: # currently only makes sense for "components"
             parens = {"(", ")", ""}
             edges = {":ARG0", ":ARG1", ":ARG2", ":op1", ":mod", ":ARG0-of", ":ARG1-of"}
             source_toks = clean_graph.split()
@@ -440,14 +446,36 @@ class PenmanDataset(LegacySeq2SeqDataset):
                     if tok.startswith(":"):
                         source_toks[idx] = random.choice(list(edges - {tok}))
             masked_source = " ".join(source_toks)
+            target = clean_graph
         
-        if "unshuffle": # e.g., "components-corrupt-unshuffle"
+        if "unshuffle" in self.graph_masking: # e.g., "components-corrupt-unshuffle"
             target = self.simplify_graph(raw_graph)
-                
+
+        if "surface" in self.graph_masking: # e.g., "surface"
+            masked_source, target = self.mask_example(surface)
+
         if self.surface_in_masked_input:
             masked_source = f"{surface} <GRAPH> {masked_source}"
 
         return masked_source, target
+
+
+    def reorder_graph(self, clean_graph, raw_graph, possibly_shuffled_graph, surface):
+        """
+        Reorder a graph according to various schemes.
+        Args:
+            clean_graph: cleaned version of possibly_shuffled_graph
+            raw_graph: raw input from file
+            possibly_shuffled_graph: a shuffled version of the raw inupt, if shuffling
+            surface: target sentence
+        """
+        if self.graph_reordering == "reorder":
+            source = clean_graph
+            target = self.simplify_graph(raw_graph)
+        if self.graph_reordering == "generate":
+            target = f"{surface} <GRAPH> {self.simplify_graph(raw_graph)}"
+
+        return source, target
 
     def mask_example(self, text, maskable_tokens=None):
         """
@@ -537,17 +565,11 @@ class PenmanDataset(LegacySeq2SeqDataset):
 
         return ' '.join(new_tokens)
 
-    def simplify_graph_alt(self, graph_repr):
-        """
-        Alternative simplification that relies on penman library
-        """
-        # TODO
-        pass
-
     def collate_fn(self, batch) -> Dict[str, torch.Tensor]:
         batch = super().collate_fn(batch)
         batch["complete_graph"] = self.do_graph_completion_batch
         self.do_graph_completion_batch = random.random() < self.graph_masking_mixture
+
         return batch
 
     def __getitem__(self, index) -> Dict[str, torch.Tensor]:
@@ -571,10 +593,11 @@ class PenmanDataset(LegacySeq2SeqDataset):
             do_mask = random.random() < 0.5
 
         # randomize the graph
-        first_graph_repr = raw_graph_repr
-        if self.graph_shuffling is not None and (self.shuffle_during_gen or do_graph_completion):
-            first_graph_repr = self.randomize_graph(raw_graph_repr, self.graph_shuffling) 
-        clean_graph_repr = self.simplify_graph(first_graph_repr)
+        possibly_shuffled_graph = raw_graph_repr
+        if self.graph_shuffling is not None and ((random.random() < self.shuffle_during_gen) or do_graph_completion):
+            prefix = f"{self.graph_shuffling} Graph:"
+            possibly_shuffled_graph = self.randomize_graph(raw_graph_repr, self.graph_shuffling) 
+        clean_graph_repr = self.simplify_graph(possibly_shuffled_graph)
             
         # append a second representation, if desired
         if self.append_second_graph is not None:
@@ -591,18 +614,17 @@ class PenmanDataset(LegacySeq2SeqDataset):
         
         # include a masking objective
         if self.graph_masking and do_graph_completion and do_mask:
-            prefix = "denoise Graph: "
+            prefix = f"{self.graph_masking} Graph: "
             clean_graph_repr, target_line = self.mask_graph(
                 clean_graph_repr, raw_graph_repr, surface=target_line
             )
 
         # reorder a shuffled input
         if self.graph_reordering and do_graph_completion and not do_mask:
-            if self.graph_masking_mixture <= 1:
-                # HACK: for always-reorder case, set this to >1
-                prefix = "order Graph: "
-            tgt = self.simplify_graph(raw_graph_repr)
-            target_line = f"{target_line} <GRAPH> {tgt}" if self.graph_reordering == "generate" else tgt
+            prefix = f"{self.graph_reordering} Graph: " if self.graph_masking_mixture <= 1 else prefix
+            clean_graph_repr, target_line = self.reorder_graph(
+                clean_graph_repr, raw_graph_repr, possibly_shuffled_graph, target_line,
+            )
 
         source_line = prefix + clean_graph_repr
         source_inputs = self.encode_line(self.tokenizer, source_line, self.max_source_length)
