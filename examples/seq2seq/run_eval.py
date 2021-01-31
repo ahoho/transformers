@@ -31,7 +31,7 @@ def parse_training_metrics(data):
     metrics = defaultdict(list)
     for step in data:
         metrics['train_val_losses'].append(step['val_avg_loss'])
-        metrics['train_val_bleus'].append(step['val_avg_loss'])
+        metrics['train_val_bleus'].append(step['train_val_bleus'])
 
     metrics['best_train_val_loss'] = float(np.min(metrics['train_val_losses']))
     metrics['best_train_val_loss_step'] = int(np.argmin(metrics['train_val_losses']))
@@ -171,6 +171,8 @@ def run_generate(verbose=True):
     parser.add_argument("--amr_shuffling", choices=["reconfigure", "rearrange", "randomize"], default=None)
     parser.add_argument("--append_second_amr", choices=["canonical", "reconfigure", "rearrange", "randomize"], default=None)
 
+    parser.add_argument("--shuffle_seed", type=int, default=None)
+
     parser.add_argument("--amr_masking", choices=["components", "nodes", "all"], default=None)
     parser.add_argument(
         "--n_obs", type=int, default=-1, required=False, help="How many observations. Defaults to all."
@@ -234,7 +236,9 @@ def run_generate(verbose=True):
     data_loader = model.get_dataloader(
         type_path=args.type_path, batch_size=args.bs, shuffle=False
     )
-    Path(args.output_dir).mkdir(exist_ok=True)
+    if args.shuffle_seed:
+        data_loader.dataset.eval_seed = args.shuffle_seed
+    Path(args.output_dir).mkdir(exist_ok=True, parents=True)
     model.eval()
 
     # Generate & compute loss
