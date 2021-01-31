@@ -494,7 +494,7 @@ class AMRToTextModule(DataToTextModule):
         
 
 def main(args, model=None) -> SummarizationModule:
-    Path(args.output_dir).mkdir(exist_ok=True)
+    Path(args.output_dir).mkdir(exist_ok=True, parents=True)
     check_output_dir(args, expected_items=3)
 
     if args.n_train > -1:
