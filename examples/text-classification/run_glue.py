@@ -18,8 +18,11 @@
 
 import logging
 import os
+from pathlib import Path
 import random
+import re
 import sys
+import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -42,6 +45,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 
+from trees import ShuffleTree
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -96,6 +100,12 @@ class DataTrainingArguments:
         default=None, metadata={"help": "A csv or a json file containing the validation data."}
     )
     test_file: Optional[str] = field(default=None, metadata={"help": "A csv or a json file containing the test data."})
+
+    n_train: Optional[int] = field(default=None, metadata={"help": "Truncate the train data to this length"})
+    use_tree_data: bool = field(default=False, metadata={"help": "Read data in Penn Treebank format"})
+    shuffle_trees: float = field(default=0.0, metadata={"help": "For data in Penn Treebank format, chance that the trees are shuffled"})
+    leaves_only: float = field(default=0.0, metadata={"help": "For data in Penn Treebank format, chance that data will just be a string"})
+    use_scratch: bool = field(default=False, metadata={"help": "Save models in /scratch/"})
 
     def __post_init__(self):
         if self.task_name is not None:
@@ -159,8 +169,14 @@ def main():
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith(".yml"):
+        import yaml
+        params = yaml.load(Path(sys.argv[1]).read_text(), Loader=yaml.FullLoader)
+        model_args, data_args, training_args = parser.parse_dict(params)
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    training_args.remove_unused_columns = False # required to do processing at top of epoch
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -353,13 +369,39 @@ def main():
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
         return result
 
-    datasets = datasets.map(preprocess_function, batched=True, load_from_cache_file=not data_args.overwrite_cache)
+    drop_label = True # TODO: make a data arg
+    def tree_preprocess_function(examples, shuffle=0.0, leaves_only=0.0):
+        # Tokenize the texts
+        # TODO: convert to CNF first?
+        trees = [
+            ShuffleTree.fromstring(e).format_parse(shuffle=shuffle > random.random(), drop_label=drop_label)
+            for e in examples[sentence1_key]
+        ]
+        if leaves_only > random.random():
+            trees = [re.sub("\s+", " ", t.replace("(", "").replace(")", "")) for t in trees]
+        result = tokenizer(trees, padding=padding, max_length=max_seq_length, truncation=True)
+
+        # Map labels to IDs (not necessary for GLUE tasks)
+        if label_to_id is not None and "label" in examples:
+            result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
+        elif "label" in examples:
+            result["label"] = examples["label"]
+        return result 
+
+    train_proc_fn = preprocess_function
+    eval_proc_fn = preprocess_function
+    if data_args.use_tree_data:
+        train_proc_fn = lambda x: tree_preprocess_function(x, shuffle=data_args.shuffle_trees, leaves_only=data_args.leaves_only)
+        eval_proc_fn = lambda x: tree_preprocess_function(x, shuffle=0.0, leaves_only=data_args.leaves_only > 0.0) # if text-only ever shown, eval on that
 
     train_dataset = datasets["train"]
+    train_dataset.set_transform(train_proc_fn)
+
     eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
+    eval_dataset.set_transform(eval_proc_fn)
     if data_args.task_name is not None or data_args.test_file is not None:
         test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
-
+        test_dataset.set_transform(eval_proc_fn)
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
@@ -394,6 +436,10 @@ def main():
         data_collator = None
 
     # Initialize our Trainer
+    if data_args.use_scratch:
+        prev_output_dir = training_args.output_dir
+        out_folder = Path(training_args.output_dir).name
+        training_args.output_dir = f"/scratch/{out_folder}"
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -468,6 +514,10 @@ def main():
                         else:
                             item = label_list[item]
                             writer.write(f"{index}\t{item}\n")
+
+    if data_args.use_scratch:
+        shutil.copytree(training_args.output_dir, prev_output_dir, dirs_exist_ok=True)
+
     return eval_results
 
 
