@@ -26,7 +26,11 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
+os.environ["HF_DATASETS_CACHE"] = "/workspace/.cache/huggingface/datasets"
+
+import torch
+import numpy as np
 
 from datasets import load_dataset
 
@@ -38,6 +42,7 @@ from transformers import (
     AutoModelForMaskedLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    DataCollatorForWholeWordMask,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
@@ -49,6 +54,46 @@ from transformers.trainer_utils import get_last_checkpoint, is_main_process
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+class DataCollatorForWholeRandomWord(DataCollatorForWholeWordMask):
+    """
+    Very straightforward modification of masking probabilities so that we no longer
+    MASK and only corrupt with random words.
+
+    `mlm_probability` default is 15%, then, if masking, we always use a random word
+    (before it was 80% mask / 10% random / 10% original)
+    """
+    def mask_tokens(self, inputs: torch.Tensor, mask_labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Prepare masked tokens inputs/labels for masked language modeling. Set 'mask_labels' means we use 
+        whole word mask (wwm), we directly mask idxs according to it's ref.
+        """
+
+        if self.tokenizer.mask_token is None:
+            raise ValueError(
+                "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
+            )
+        labels = inputs.clone()
+        # We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
+
+        probability_matrix = mask_labels
+
+        special_tokens_mask = [
+            self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
+        ]
+        probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
+        if self.tokenizer._pad_token is not None:
+            padding_mask = labels.eq(self.tokenizer.pad_token_id)
+            probability_matrix.masked_fill_(padding_mask, value=0.0)
+
+        masked_indices = probability_matrix.bool()
+        labels[~masked_indices] = -100  # We only compute loss on masked tokens
+
+        # we replace masked input tokens with random word
+        random_words = torch.randint(len(self.tokenizer), labels.shape, dtype=torch.long)
+        inputs[masked_indices] = random_words[masked_indices]
+
+        return inputs, labels
 
 
 @dataclass
@@ -134,6 +179,15 @@ class DataTrainingArguments:
     )
     mlm_probability: float = field(
         default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
+    )
+    wwm: bool = field(
+        default=False, metadata={"help": "Whether to only do whole-word masking"}
+    )
+    random_word_masking_only: bool = field(
+        default=False, metadata={"help": "Whether to only do random-word masking"}
+    )
+    coarse_permute_inputs: bool = field(
+        default=False, metadata={"help": "Whitespace tokenize each example, shuffle, then concatenate. Done once per run (not epoch/batch), so a hack."}
     )
     line_by_line: bool = field(
         default=False,
@@ -325,7 +379,11 @@ def main():
 
         def tokenize_function(examples):
             # Remove empty lines
-            examples["text"] = [line for line in examples["text"] if len(line) > 0 and not line.isspace()]
+            if data_args.coarse_permute_inputs:
+                examples["text"] = [" ".join(np.random.permutation(line.split())) for line in examples["text"] if len(line) > 0 and not line.isspace()]
+            else:
+                examples["text"] = [line for line in examples["text"] if len(line) > 0 and not line.isspace()]
+            
             return tokenizer(
                 examples["text"],
                 padding=padding,
@@ -389,7 +447,13 @@ def main():
 
     # Data collator
     # This one will take care of randomly masking the tokens.
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
+    if not data_args.random_word_masking_only and not data_args.wwm:
+        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
+    elif data_args.random_word_masking_only:
+        data_collator = DataCollatorForWholeRandomWord(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
+    elif data_args.wwm:
+        print("Doing whole word masking")
+        data_collator = DataCollatorForWholeWordMask(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
 
     # Initialize our Trainer
     trainer = Trainer(
