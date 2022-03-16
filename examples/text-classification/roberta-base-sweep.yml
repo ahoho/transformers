@@ -1,0 +1,32 @@
+job_name: "roberta-base-1k"
+
+## These will be populated by the code
+# Note the pipe | before `slurm_header` is necessary to parse as separate lines
+templates:
+    command: "/workspace/.conda/envs/transformers4/bin/python run_glue.py {config_path}"
+    # scheme for naming folders
+    run_name: "lr_{learning_rate}-epochs_{num_train_epochs}-text_{leaves_only}"
+    slurm_header: |
+        #!/bin/bash
+        #SBATCH --constraint=gpu-small
+        #SBATCH --array=0-{n_jobs}
+        #SBATCH --job-name={job_name}
+        #SBATCH --output=/workspace/transformers/examples/text-classification/sbatch-logs/{job_name}-%A-%a.log
+        #SBATCH --gpus-per-node=1
+        #SBATCH --cpus-per-task=4
+  
+## Hyperparams
+hyper:
+    learning_rate: [0.001, 0.0001, 0.00005, 0.00001, 0.000005]
+    num_train_epochs: [5, 10, 15, 20, 30]
+    leaves_only: [true, false]
+
+# defaults
+params:
+    learning_rate: 0.00005
+    per_device_train_batch_size: 16
+    leaves_only: true
+    model_name_or_path: roberta-base
+    train_file: /workspace/transformers/examples/text-classification/trees/train-1000.json
+    validation_file: /workspace/transformers/examples/text-classification/trees/dev.json
+    batch_size: 16

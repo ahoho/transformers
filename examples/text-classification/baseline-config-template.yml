@@ -1,0 +1,14 @@
+use_tree_data: true
+do_train: true
+do_eval: true
+evaluation_strategy: steps
+eval_steps: 100
+save_total_limit: 1
+load_best_model_at_end: true
+metric_for_best_model: accuracy
+max_seq_length: 200
+no_pad_to_match_length: true
+overwrite_output_dir: true
+disable_tqdm: true
+use_scratch: true
+per_device_eval_batch_size: 16
