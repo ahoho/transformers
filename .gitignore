@@ -1,4 +1,8 @@
 # Initially taken from Github's Python gitignore file
+examples/text-classification
+examples/language-modeling
+examples/pytorch/text-classification/models
+examples/pytorch/text-classification/tmp*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
