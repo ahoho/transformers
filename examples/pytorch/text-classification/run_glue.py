@@ -20,11 +20,14 @@ import logging
 import os
 import random
 import sys
+from turtle import forward
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 import datasets
 import numpy as np
+import torch
+from torch import dropout, nn
 from datasets import load_dataset, load_metric
 
 import transformers
@@ -33,6 +36,8 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
+    DebertaV2Model,
+    DebertaV2PreTrainedModel,
     EvalPrediction,
     HfArgumentParser,
     PretrainedConfig,
@@ -41,8 +46,10 @@ from transformers import (
     default_data_collator,
     set_seed,
 )
+from transformers.models.deberta_v2.modeling_deberta_v2 import ContextPooler, StableDropout
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.file_utils import ModelOutput
 from transformers.utils.versions import require_version
 
 
@@ -67,6 +74,295 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class MutiTaskOutput(ModelOutput):
+    """
+    Base class for outputs of sentence classification models.
+
+    Args:
+        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+            Classification (or regression if config.num_labels==1) loss.
+        task_losses (`dict[str, torch.FloatTensor]`)
+        task_logits (`Dict[str, torch.FloatTensor]`, each of shape `(batch_size, config.num_labels[task])`):
+            Classification (or regression if config.num_labels==1) scores (before SoftMax).
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    task_losses: Optional[Dict[str, torch.FloatTensor]] = None
+    task_logits: Dict[str, torch.FloatTensor] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
+class MultiTaskClassificationModel(transformers.PreTrainedModel):
+    """
+    Multi-Task model adapted for a single input with multiple
+    classification/regression objectives
+
+    Borrowed from 
+    https://colab.research.google.com/github/zphang/zphang.github.io/blob/
+        master/files/notebooks/Multi_task_Training_with_Transformers_NLP.ipynb
+    """
+    def __init__(self, encoder, taskmodels_dict):
+        """
+        Setting MultitaskModel up as a PretrainedModel allows us
+        to take better advantage of Trainer features
+        """
+        super().__init__(transformers.PretrainedConfig())
+
+        self.encoder = encoder # TODO: is this even necessary?
+        self.taskmodels_dict = nn.ModuleDict(taskmodels_dict)
+        self.identity = nn.Identity()
+
+    @classmethod
+    def create(cls, model_name, model_config_dict):
+        """
+        This creates a MultitaskModel using the model class and config objects
+        from single-task models. 
+
+        We do this by creating each single-task model, and having them share
+        the same encoder transformer.
+        """
+        shared_encoder = None
+        taskmodels_dict = {}
+        for task_name, config in model_config_dict.items():
+            model = AutoModelForSequenceClassification.from_pretrained(
+                model_name, 
+                config=config,
+            )
+            if shared_encoder is None:
+                shared_encoder = getattr(model, cls.get_encoder_attr_name(model))
+            else:
+                setattr(model, cls.get_encoder_attr_name(model), shared_encoder)
+
+            taskmodels_dict[task_name] = model
+        return cls(encoder=shared_encoder, taskmodels_dict=taskmodels_dict)
+
+    @classmethod
+    def get_encoder_attr_name(cls, model):
+        """
+        The encoder transformer is named differently in each model "architecture".
+        This method lets us get the name of the encoder attribute
+        """
+        model_class_name = model.__class__.__name__
+        if model_class_name.startswith("Bert"):
+            return "bert"
+        elif model_class_name.startswith("Roberta"):
+            return "roberta"
+        elif model_class_name.startswith("Albert"):
+            return "albert"
+        elif model_class_name.startswith("Deberta"):
+            return "deberta"
+        else:
+            raise NotImplemented(f"Add support for new model {model_class_name}")
+
+    def forward(self, labels=None, **kwargs):
+        total_loss = 0.
+        losses, logits = {}, {}
+        shared_logits = None
+
+        for task, task_model in self.taskmodels_dict.items():
+            # do a single pass through the shared encoder
+            if shared_logits is None:
+                # a bit of a hack: override the model's classifier with the identity
+                # function to get a shared set of pre-classifier-layer outputs
+                _classifier = task_model.classifier
+                task_model.classifier = self.identity
+                outputs = task_model(labels=None, **kwargs)
+                task_model.classifier = _classifier
+                shared_logits = outputs.logits
+    
+            # pass the shared logits through the task-specific classifier
+            task_logits = task_model.classifier(shared_logits)
+            logits[task] = task_logits
+            task_labels = labels[task] if labels is not None else None
+            if task_labels is not None:
+                # for now, won't deal with multi-label
+                if task_model.num_labels == 1:
+                    # regression task
+                    loss_fn = nn.MSELoss()
+                    task_logits = task_logits.view(-1).to(task_labels.dtype)
+                    task_loss = loss_fn(task_logits, task_labels.view(-1))
+                elif task_labels.dim() == 1 or task_labels.size(-1) == 1:
+                    label_index = (task_labels >= 0).nonzero()
+                    task_labels = task_labels.long()
+                    if label_index.size(0) > 0:
+                        labeled_logits = torch.gather(
+                            task_logits, 0, label_index.expand(label_index.size(0), task_logits.size(1))
+                        )
+                        task_labels = torch.gather(task_labels, 0, label_index.view(-1))
+                        loss_fct = nn.CrossEntropyLoss()
+                        task_loss = loss_fct(labeled_logits.view(-1, task_model.num_labels).float(), task_labels.view(-1))
+                    else:
+                        task_loss = torch.tensor(0).to(task_logits)
+                else:
+                    log_softmax = nn.LogSoftmax(-1)
+                    task_loss = -((log_softmax(task_logits) * task_labels).sum(-1)).mean()
+                task_loss = task_model.config.loss_weight * task_loss
+                losses[task] = task_loss
+                loss += task_loss
+
+        return MutiTaskOutput(
+            loss=total_loss,
+            losses=losses,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class MultiTaskTrainer(Trainer):
+    def __init__(self, model, loss_weights=None, is_regression=None, *args, **kwargs):
+        if loss_weights is None:
+            loss_weights = np.ones(model.num_labels)
+        if is_regression is None:
+            is_regression = np.zeros(model.num_labels)
+
+        self.bce_loss_weights = torch.tensor(loss_weights * (is_regression == 0))
+        self.regression_loss_weights = torch.tensor(loss_weights * (is_regression))
+
+        self.any_classification = np.any(is_regression == 0)
+        self.any_regression = np.any(is_regression)
+
+        assert(model.num_labels == len(loss_weights))
+        assert(model.num_labels == len(is_regression))
+        super().__init__(model, *args, **kwargs)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+    
+        bce_loss, mse_loss = 0., 0.
+        if self.any_classification:
+            bce_loss_fct = nn.BCEWithLogitsLoss(weight=self.bce_loss_weights)
+            bce_loss = bce_loss_fct(logits, labels)
+        if self.any_regression:
+            mse_loss = ((logits - labels).square() * torch.regression_loss_weights).mean()
+        loss = bce_loss + mse_loss
+        return (loss, outputs) if return_outputs else loss
+
+
+
+
+class DebertaV2ForMultiTaskSequenceClassification(DebertaV2PreTrainedModel):
+
+    def __init__(self, config):
+        super().__init__(config)
+        
+        self.deberta = DebertaV2Model(config)
+        self.pooler = ContextPooler(config)
+        output_dim = self.pooler.output_dim
+
+        drop_out = getattr(config, "cls_dropout", None)
+        drop_out = self.config.hidden_dropout_prob if drop_out is None else drop_out
+        self.dropout = StableDropout(drop_out)
+
+        tasks = getattr(config, "tasks")
+        self.classifiers = {}
+        self.num_labels = {}
+        self.weights = {} # for adversarial adaptation
+        for task_name, (num_labels, weight) in tasks.items():
+            self.classifiers[task_name] = nn.Linear(output_dim, num_labels)
+            self.num_labels[task_name] = num_labels
+            self.weights[task_name] = weight
+        
+        self.post_init()
+    
+    def get_input_embeddings(self):
+        return self.deberta.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings):
+        self.deberta.set_input_embeddings(new_embeddings)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (dict of `torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.deberta(
+            input_ids,
+            token_type_ids=token_type_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        encoder_layer = outputs[0]
+        pooled_output = self.pooler(encoder_layer)
+        pooled_output = self.dropout(pooled_output)
+        logits, task_losses = {}, {}
+        
+        loss = None if labels is None else 0
+        for task in self.classifiers:
+            task_logits = self.classifiers[task](pooled_output)
+
+            if labels is not None:
+                task_labels = labels[task]
+                # for now, won't deal with multi-label
+                if self.num_labels[task] == 1:
+                    # regression task
+                    loss_fn = nn.MSELoss()
+                    task_logits = task_logits.view(-1).to(task_labels.dtype)
+                    task_loss = loss_fn(task_logits, task_labels.view(-1))
+                elif task_labels.dim() == 1 or task_labels.size(-1) == 1:
+                    label_index = (task_labels >= 0).nonzero()
+                    task_labels = task_labels.long()
+                    if label_index.size(0) > 0:
+                        labeled_logits = torch.gather(
+                            task_logits, 0, label_index.expand(label_index.size(0), task_logits.size(1))
+                        )
+                        task_labels = torch.gather(task_labels, 0, label_index.view(-1))
+                        loss_fct = CrossEntropyLoss()
+                        task_loss = loss_fct(labeled_logits.view(-1, self.num_labels[task]).float(), task_labels.view(-1))
+                    else:
+                        task_loss = torch.tensor(0).to(task_logits)
+                else:
+                    log_softmax = nn.LogSoftmax(-1)
+                    task_loss = -((log_softmax(task_logits) * task_labels).sum(-1)).mean()
+                task_loss = self.weights[task] * task_loss
+                task_losses[task] = task_loss
+                loss += task_loss
+            logits[task] = task_logits
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return MutiTaskOutput(
+            loss=loss, task_losses=task_losses, task_logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions
+        )
+
+
+@dataclass
 class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
@@ -85,6 +381,19 @@ class DataTrainingArguments:
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
+    )
+    text_key: Optional[str] = field(
+        default="text", metadata={"help": "Key in data corresponding to the text field"}
+    )
+    multi_task_labels: Optional[str] = field(
+        default=None, metadata={
+            "help": "Labels, separated by commas, for multiple classification losses. "
+        },
+    )
+    multi_task_weights: Optional[str] = field(
+        default=None, metadata={
+            "help": "Weights, separated by commas, to apply to each of the multiple classification losses. "
+        },
     )
     max_seq_length: int = field(
         default=128,
@@ -143,7 +452,7 @@ class DataTrainingArguments:
             raise ValueError("Need either a GLUE task, a training/validation file or a dataset name.")
         else:
             train_extension = self.train_file.split(".")[-1]
-            assert train_extension in ["csv", "json"], "`train_file` should be a csv or a json file."
+            assert train_extension in ["csv", "json", "jsonl"], "`train_file` should be a csv or a json file."
             validation_extension = self.validation_file.split(".")[-1]
             assert (
                 validation_extension == train_extension
@@ -289,13 +598,38 @@ def main():
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
     # Labels
-    if data_args.task_name is not None:
+    if data_args.task_name is not None and data_args.multi_task_labels is None:
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
             label_list = raw_datasets["train"].features["label"].names
             num_labels = len(label_list)
         else:
             num_labels = 1
+    if data_args.multi_task_labels is not None:
+        multi_task_labels = data_args.multi_task_labels.split(",")
+
+        # create the weights
+        multi_task_weights = [1.] * len(multi_task_labels)
+        if data_args.multi_task_weights is not None:
+            multi_task_weights = [float(w) for w in data_args.multi_task_weights.split(",")]
+            assert len(multi_task_labels) == len(multi_task_weights)
+        loss_weights = dict(zip(multi_task_labels, multi_task_weights))
+
+        # create the label names and maps
+        num_labels, label_list = {}, {}
+        for task_name in multi_task_labels:
+            # store number of labels and weight
+            is_regression = raw_datasets["train"].features[task_name].dtype in ["float32", "float64"]
+            if is_regression:
+                task_num_labels = 1
+                task_label_list = None
+            else:
+                task_label_list = raw_datasets["train"].unique(task_name)
+                task_label_list.sort()
+                task_num_labels = len(task_label_list)
+    
+            num_labels[task_name] = task_num_labels
+            label_list[task_name] = task_label_list
     else:
         # Trying to have good defaults here, don't hesitate to tweak to your needs.
         is_regression = raw_datasets["train"].features["label"].dtype in ["float32", "float64"]
@@ -312,14 +646,6 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
-        num_labels=num_labels,
-        finetuning_task=data_args.task_name,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -327,18 +653,49 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
+    if data_args.multi_task_labels is None:
+        config = AutoConfig.from_pretrained(
+            model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+            num_labels=num_labels,
+            finetuning_task=data_args.task_name,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    else:
+        model_config_dict = {
+            task_name: AutoConfig.from_pretrained(
+                model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+                num_labels=task_num_labels,
+                loss_weight=loss_weights[task_name], # weight to apply to loss for this task
+                finetuning_task=task_name, # NOTE: I believe this only affects bookkeeping, set to None if not
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+            )
+            for task_name, task_num_labels in num_labels.items()
+        }
+        model = MultiTaskClassificationModel.create(
+            model_name=model_args.model_name_or_path,
+            model_config_dict=model_config_dict,
+            # cache_dir=model_args.cache_dir,
+            # revision=model_args.model_revision,
+            # use_auth_token=True if model_args.use_auth_token else None,
+        )
 
     # Preprocessing the raw_datasets
-    if data_args.task_name is not None:
+    if data_args.task_name is not None and not data_args.multi_task_labels is None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
+    elif data_args.multi_task_labels is not None:
+        sentence1_key, sentence2_key = data_args.text_key, None
     else:
         # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
         non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
@@ -360,7 +717,8 @@ def main():
     # Some models have set the order of the labels to use, so let's make sure we do use it.
     label_to_id = None
     if (
-        model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
+        data_args.multi_task_labels is None
+        and model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
         and data_args.task_name is not None
         and not is_regression
     ):
@@ -374,12 +732,23 @@ def main():
                 f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
                 "\nIgnoring the model labels as a result.",
             )
+    elif data_args.multi_task_labels is not None:
+        label_to_id = {}
+        for task, task_label_list in label_list.items():
+            if task_label_list is not None:
+                label_to_id[task] = {v: i for i, v in enumerate(task_label_list)}
+            else:
+                label_to_id[task] = None
     elif data_args.task_name is None and not is_regression:
         label_to_id = {v: i for i, v in enumerate(label_list)}
 
-    if label_to_id is not None:
+    if label_to_id is not None and data_args.multi_task_labels is None:
         model.config.label2id = label_to_id
         model.config.id2label = {id: label for label, id in config.label2id.items()}
+    elif label_to_id is not None and data_args.multi_task_labels is not None:
+        for task, task_label_to_id in label_to_id.items():
+            model.taskmodels_dict[task].config.label2id = task_label_to_id
+            model.taskmodels_dict[task].config.id2label = {id: label for label, id in task_label_to_id.items()}
     elif data_args.task_name is not None and not is_regression:
         model.config.label2id = {l: i for i, l in enumerate(label_list)}
         model.config.id2label = {id: label for label, id in config.label2id.items()}
@@ -399,8 +768,13 @@ def main():
         result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
-        if label_to_id is not None and "label" in examples:
+        if data_args.multi_task_labels is None and label_to_id is not None and "label" in examples:
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
+        elif data_args.multi_task_labels is not None:
+            result["label"] = {
+                task: [(task_label_to_id[l] if l != -1 else -1) for l in examples[task]]
+                for task, task_label_to_id in label_to_id.items()
+            }
         return result
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
@@ -445,6 +819,7 @@ def main():
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
     def compute_metrics(p: EvalPrediction):
+        import pdb; pdb.set_trace()
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
         if data_args.task_name is not None:
@@ -456,6 +831,9 @@ def main():
             return {"mse": ((preds - p.label_ids) ** 2).mean().item()}
         else:
             return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
+
+    def compute_multitask_metrics(p: EvalPrediction):
+        pass
 
     # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
     # we already did the padding.
